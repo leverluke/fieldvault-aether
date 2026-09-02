@@ -1,0 +1,554 @@
+<header id="app-header" class="app-header">
+    <button id="btn-back" class="btn-icon hidden" aria-label="Back">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M15 18l-6-6 6-6"/></svg>
+    </button>
+    <h1 id="header-title">FieldVault</h1>
+    <div class="header-actions">
+      <button id="btn-product-mode" class="mode-pill hidden" title="Switch Commercial or Defense mode" aria-label="Product mode">
+        <span class="mode-pill-dot" aria-hidden="true"></span>
+        <span id="mode-pill-label">O&G</span>
+      </button>
+      <button id="btn-model-mode" class="btn-icon hidden" title="Modeling Mode">📐</button>
+      <button id="btn-highvis" class="btn-icon hidden" title="High Visibility">🔆</button>
+      <button id="btn-search" class="btn-icon" aria-label="Search">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+      </button>
+      <button id="btn-more" class="btn-icon" aria-label="More" title="More">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
+      </button>
+      <button id="btn-new-visit" class="btn-primary btn-sm">+ Visit</button>
+    </div>
+  </header>
+
+  <div id="search-bar" class="search-bar hidden">
+    <input type="search" id="search-input" placeholder="Search visits, tags, areas…" autocomplete="off">
+    <button id="btn-clear-search" class="btn-icon">×</button>
+  </div>
+  <nav id="crumb-bar" class="crumb-bar hidden" aria-label="You are here"></nav>
+
+  <main id="app-main">
+    <section id="view-visits" class="view active">
+      <div id="coach-card" class="coach-card">
+        <h2>How a site visit works</h2>
+        <ol class="coach-steps">
+          <li><strong>Create a visit</strong> for this plant or unit.</li>
+          <li><strong>Add equipment</strong> as you walk — a pump, tank, valve, pipe.</li>
+          <li><strong>Take the photos</strong> we list. Start with a wide shot and the nameplate.</li>
+        </ol>
+        <button type="button" id="btn-coach-dismiss" class="btn-primary">Got it</button>
+      </div>
+      <div id="mode-banner" class="mode-banner">
+        <div class="mode-switch" role="group" aria-label="Product mode">
+          <button type="button" id="btn-mode-commercial" class="mode-btn active">Commercial</button>
+          <button type="button" id="btn-mode-defense" class="mode-btn">Defense</button>
+        </div>
+        <p id="mode-banner-text">Oil & gas field notes — photograph equipment, tag it, and leave with a client-ready package.</p>
+      </div>
+      <div id="visits-empty" class="empty-state hidden">
+        <div class="empty-icon" aria-hidden="true">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>
+        </div>
+        <h2 id="visits-empty-title">Start your first site visit</h2>
+        <p id="visits-empty-body">Walk the unit, snap photos of what you see, and FieldVault will help you organize them for the office.</p>
+        <button id="btn-empty-new" class="btn-primary btn-lg">Create First Visit</button>
+      </div>
+      <div id="visits-list" class="card-list"></div>
+      <div class="home-tools">
+        <button id="btn-backup" class="btn-secondary">Backup Data</button>
+        <label for="restore-input" class="btn-secondary">Restore Backup</label>
+        <input type="file" id="restore-input" accept="application/json" hidden>
+      </div>
+    </section>
+
+    <section id="view-visit-detail" class="view">
+      <div class="detail-header" id="visit-detail-header"></div>
+      <div id="completeness-card" class="completeness-card hidden">
+        <div class="completeness-header">
+          <span class="completeness-title" id="completeness-title-text">How complete is this visit?</span>
+          <span id="completeness-score" class="score-badge">0%</span>
+        </div>
+        <div id="completeness-stats" class="completeness-stats"></div>
+        <div id="completeness-warnings" class="completeness-warnings"></div>
+        <button id="btn-ready-check" class="btn-secondary btn-sm" style="margin-top:10px;width:100%">What's missing?</button>
+      </div>
+      <div class="action-grid" id="visit-action-grid">
+        <button type="button" class="action-tile primary" id="tile-add-eq">
+          <span class="action-title">Add equipment</span>
+          <span class="action-sub">Pump, valve, tank, pipe…</span>
+        </button>
+        <button type="button" class="action-tile" id="tile-quick">
+          <span class="action-title">Snap photos</span>
+          <span class="action-sub">Shoot first, assign later</span>
+        </button>
+        <button type="button" class="action-tile" id="tile-map">
+          <span class="action-title">Map</span>
+          <span class="action-sub">See pins & what’s nearby</span>
+        </button>
+        <button type="button" class="action-tile" id="tile-missing">
+          <span class="action-title">What’s missing?</span>
+          <span class="action-sub">Check before you leave</span>
+        </button>
+      </div>
+      <div class="visit-tools">
+        <button id="btn-open-map" class="btn-secondary btn-sm tile-dup-map">Map</button>
+        <button id="btn-open-photos" class="btn-secondary btn-sm">All photos</button>
+        <button id="btn-walk-seq" class="btn-secondary btn-sm">Walk path</button>
+        <button id="btn-quick-capture" class="btn-secondary btn-sm tile-dup-qc">Quick capture</button>
+      </div>
+
+      <div class="section-title-row">
+        <h2 id="areas-heading">Areas of the plant</h2>
+        <div class="btn-group">
+          <button id="btn-suggest-areas" class="btn-secondary btn-sm">Suggest areas from GPS</button>
+          <button id="btn-add-area" class="btn-primary btn-sm">+ Area</button>
+        </div>
+      </div>
+      <div id="areas-list" class="card-list"></div>
+      <div class="section-title-row" style="margin-top:24px">
+        <h2 id="equipment-heading">Equipment you documented</h2>
+        <button id="btn-add-equipment" class="btn-primary btn-sm">+ Equipment</button>
+      </div>
+      <div id="eq-type-filter" class="chip-group eq-filter"></div>
+      <div id="equipment-list" class="card-list"></div>
+      <div class="detail-actions">
+        <button id="btn-export-package" class="btn-primary">Export Package</button>
+        <button id="btn-generate-pdf" class="btn-secondary">Generate Report</button>
+        <button id="btn-edit-visit" class="btn-secondary">Edit Visit</button>
+        <button id="btn-delete-visit" class="btn-danger">Delete Visit</button>
+      </div>
+    </section>
+
+    <section id="view-area-detail" class="view">
+      <div class="detail-header" id="area-detail-header"></div>
+      <div class="section-title-row">
+        <h2>Equipment in this Area</h2>
+        <button id="btn-add-eq-to-area" class="btn-primary btn-sm">+ Equipment</button>
+      </div>
+      <div id="area-equipment-list" class="card-list"></div>
+      <div class="detail-actions">
+        <button id="btn-edit-area" class="btn-secondary">Edit Area</button>
+        <button id="btn-delete-area" class="btn-danger">Delete Area</button>
+      </div>
+    </section>
+
+    <section id="view-equipment-detail" class="view">
+      <div id="eq-pager" class="eq-pager fv-eq-pager hidden">
+        <button type="button" id="btn-eq-prev" class="btn-secondary btn-sm">Previous</button>
+        <span id="eq-pager-label"></span>
+        <button type="button" id="btn-eq-next" class="btn-secondary btn-sm">Next</button>
+      </div>
+      <div class="form-section fv-eq-type">
+        <label>What is it?</label>
+        <p class="help-text" id="eq-type-help">Pick the closest match. This unlocks the right photo list.</p>
+        <select id="eq-type-select" class="eq-type-select" aria-label="Equipment type"></select>
+        <div class="chip-group type-chip-grid" id="eq-type-chips"></div>
+      </div>
+      <div class="form-section fv-eq-tag">
+        <label>Name / tag <span class="required">*</span></label>
+        <input type="text" id="eq-tag" placeholder="e.g. P-101 or Charge pump" required>
+        <p class="help-text">Plant tag if you have it. If not, a plain name is fine — or just take a photo and we’ll name it.</p>
+      </div>
+      <div class="form-section fv-eq-area">
+        <label>Area / Zone</label>
+        <select id="eq-area"></select>
+      </div>
+      <div class="form-section fv-eq-location">
+        <label>Where is it?</label>
+        <input type="text" id="eq-location" placeholder="e.g. North pipe rack, west of the treater">
+      </div>
+      <div class="form-section fv-eq-coords">
+        <div class="coords-row">
+          <div><label>Latitude</label><input type="number" id="eq-lat" step="any" inputmode="decimal" placeholder="0.000000"></div>
+          <div><label>Longitude</label><input type="number" id="eq-lng" step="any" inputmode="decimal" placeholder="0.000000"></div>
+        </div>
+        <button type="button" id="btn-get-gps" class="btn-secondary gps-btn">Capture GPS</button>
+        <p id="gps-status" class="gps-status">Tap GPS to capture this spot</p>
+      </div>
+      <div class="form-section fv-eq-notes">
+        <label id="eq-notes-label">Notes</label>
+        <div class="input-with-voice">
+          <textarea id="eq-notes" rows="3" placeholder="What you noticed: leaks, missing tags, access issues…"></textarea>
+          <button type="button" class="btn-voice" id="btn-voice-eq-notes" aria-label="Record voice note">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><path d="M12 18v3"/></svg>
+          </button>
+        </div>
+        <p class="help-text">Tap the mic to record. Tap again to stop. Works offline.</p>
+        <div id="eq-voice-list" class="voice-list"></div>
+      </div>
+
+      <details class="optional-details fv-eq-optional">
+        <summary id="optional-details-summary">Condition, P&ID, nameplate (optional)</summary>
+        <div class="structured-notes" style="margin-top:12px">
+          <div class="form-section">
+            <label>Condition</label>
+            <div class="chip-group" id="condition-chips">
+              <button type="button" class="chip" data-value="Good">Good</button>
+              <button type="button" class="chip" data-value="Fair">Fair</button>
+              <button type="button" class="chip" data-value="Poor">Poor</button>
+              <button type="button" class="chip" data-value="Critical">Critical</button>
+            </div>
+          </div>
+          <div class="form-section">
+            <label>Priority</label>
+            <div class="chip-group" id="priority-chips">
+              <button type="button" class="chip" data-value="Low">Low</button>
+              <button type="button" class="chip" data-value="Medium">Medium</button>
+              <button type="button" class="chip" data-value="High">High</button>
+              <button type="button" class="chip" data-value="Urgent">Urgent</button>
+            </div>
+          </div>
+          <div class="form-section">
+            <label>Recommendation</label>
+            <input type="text" id="eq-recommendation" placeholder="Optional">
+          </div>
+          <div class="form-section">
+            <label>Service / what it handles</label>
+            <input type="text" id="eq-service" placeholder="e.g. Crude charge, produced water, fuel gas">
+          </div>
+          <div class="form-section">
+            <label>P&ID / drawing number</label>
+            <input type="text" id="eq-pid" placeholder="e.g. P&ID-12-041">
+          </div>
+          <div class="form-section">
+            <label>Line number</label>
+            <input type="text" id="eq-line" placeholder='e.g. 8"-CS-101-A1'>
+          </div>
+          <div class="form-section">
+            <label>Manufacturer</label>
+            <input type="text" id="eq-mfr" placeholder="From the nameplate">
+          </div>
+          <div class="form-section">
+            <label>Model / serial</label>
+            <div class="coords-row" style="grid-template-columns:1fr 1fr">
+              <input type="text" id="eq-model" placeholder="Model">
+              <input type="text" id="eq-serial" placeholder="Serial">
+            </div>
+          </div>
+        </div>
+      </details>
+      <div class="photo-prompts fv-eq-prompts">
+        <div class="shot-head">
+          <div class="prompts-title" id="photo-prompts-title">Photos to take</div>
+          <span id="shot-progress" class="badge">0 shots</span>
+        </div>
+        <p class="prompts-help" id="photo-prompts-help">Tap Take on a row. Start with a wide shot and the nameplate — those two matter most.</p>
+        <div id="next-shot-banner" class="next-shot-banner hidden"></div>
+        <div id="shot-guide-list" class="shot-guide-list"></div>
+      </div>
+      <div class="section-title-row fv-eq-photos-head">
+        <h2>Photos <span id="photo-count-badge" class="badge">0</span></h2>
+        <div>
+          <label for="photo-input" class="btn-primary btn-sm">+ Extra photo</label>
+          <input type="file" id="photo-input" accept="image/*,image/heic,image/heif,.heic,.heif" hidden multiple>
+          <input type="file" id="photo-input-cam" accept="image/*,image/heic,image/heif,.heic,.heif" capture="environment" hidden>
+        </div>
+      </div>
+      <div id="photos-grid" class="photos-grid fv-eq-photos"></div>
+      <div class="form-section fv-eq-followup" style="margin-top:12px">
+        <label class="checkbox-label"><input type="checkbox" id="eq-needs-followup"> <span id="eq-followup-text">Flag as “Needs follow-up photos”</span></label>
+      </div>
+      <div class="detail-actions fv-eq-actions">
+        <button id="btn-save-equipment" class="btn-primary btn-lg">Save Equipment</button>
+        <button id="btn-delete-equipment" class="btn-danger">Delete</button>
+      </div>
+    </section>
+
+    <section id="view-quick-capture" class="view">
+      <div class="quick-capture-header">
+        <p id="qc-help">Take a burst of photos now. Assign them to pumps, valves, and tanks afterward.</p>
+        <div class="qc-stats"><span id="qc-count">0 photos</span> in queue</div>
+      </div>
+      <div class="qc-actions">
+        <label for="qc-photo-input" class="btn-primary btn-lg">Take / Add Photos</label>
+        <input type="file" id="qc-photo-input" accept="image/*" capture="environment" hidden multiple>
+      </div>
+      <div id="qc-preview" class="qc-preview"></div>
+      <div class="detail-actions">
+        <button id="btn-qc-assign" class="btn-primary" disabled>Assign to Equipment…</button>
+        <button id="btn-qc-done" class="btn-secondary">Done</button>
+      </div>
+    </section>
+
+    <section id="view-assign-photos" class="view">
+      <p class="help-text" id="assign-help">Tap the equipment, then tap the photos that belong to it.</p>
+      <div id="assign-equipment-list" class="card-list"></div>
+      <button id="btn-assign-new-eq" class="btn-secondary" style="width:100%;margin:12px 0">+ Create New Equipment</button>
+      <div id="assign-photo-select" class="photos-grid" style="margin-top:16px"></div>
+      <div class="detail-actions">
+        <button id="btn-confirm-assign" class="btn-primary" disabled>Assign Selected</button>
+      </div>
+    </section>
+
+    <section id="view-markup" class="view">
+      <div class="markup-toolbar">
+        <button data-tool="pen" class="tool-btn active">Pen</button>
+        <button data-tool="arrow" class="tool-btn">Arrow</button>
+        <button data-tool="circle" class="tool-btn">Circle</button>
+        <button data-tool="text" class="tool-btn">T</button>
+        <button id="btn-clear-markup" class="tool-btn">Clear</button>
+        <button id="btn-ai-analyze" class="tool-btn" title="AI Analyze">AI</button>
+        <button id="btn-save-markup" class="btn-primary btn-sm">Done</button>
+      </div>
+      <div class="canvas-container" id="markup-canvas-wrap"></div>
+      <div class="form-section">
+        <label>Photo Note</label>
+        <div class="input-with-voice">
+          <input type="text" id="photo-note" placeholder="Optional note">
+          <button type="button" class="btn-voice" id="btn-voice-photo-note" aria-label="Record voice note">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><path d="M12 18v3"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="form-section">
+        <label id="photo-type-label">What does this photo show?</label>
+        <select id="photo-prompt-type">
+          <option value="">— Select —</option>
+          <option value="overall">Overall / context</option>
+          <option value="tag">Nameplate / tag</option>
+          <option value="detail">Detail / close-up</option>
+          <option value="other">Other</option>
+        </select>
+      </div>
+    </section>
+
+    <section id="view-global-photos" class="view">
+      <div class="section-title-row">
+        <h2>Photo Library</h2>
+        <select id="global-photos-filter" class="filter-select">
+          <option value="all">All visits</option>
+        </select>
+      </div>
+      <p class="help-text" id="global-photos-help" style="margin-bottom:12px">Every photo stored on this device.</p>
+      <div id="global-photos-grid" class="photos-grid photos-library"></div>
+    </section>
+
+    <section id="view-global-map" class="view">
+      <div class="map-toolbar">
+        <button id="btn-gmap-satellite" class="btn-secondary btn-sm active">Satellite</button>
+        <button id="btn-gmap-street" class="btn-secondary btn-sm">Street</button>
+        <button id="btn-gmap-locate" class="btn-secondary btn-sm">Me</button>
+      </div>
+      <div id="global-map-container"></div>
+      <div id="global-map-legend" class="map-legend"></div>
+    </section>
+
+    <section id="view-photos-library" class="view">
+      <div class="section-title-row">
+        <h2>All Photos</h2>
+        <div class="filter-row">
+          <select id="photos-filter" class="filter-select">
+            <option value="all">All equipment</option>
+          </select>
+          <select id="photos-shot-filter" class="filter-select">
+            <option value="all">All shot types</option>
+          </select>
+        </div>
+      </div>
+      <div id="photos-library-grid" class="photos-grid photos-library"></div>
+    </section>
+
+    <section id="view-map" class="view">
+      <div class="map-toolbar">
+        <button id="btn-map-satellite" class="btn-secondary btn-sm active">Satellite</button>
+        <button id="btn-map-street" class="btn-secondary btn-sm">Street</button>
+        <button id="btn-map-locate" class="btn-secondary btn-sm">Me</button>
+      </div>
+      <div id="map-container"></div>
+      <div id="map-legend" class="map-legend"></div>
+      <div class="section-title-row" style="margin-top:16px">
+        <h2>Nearest to me</h2>
+        <button id="btn-refresh-nearest" class="btn-secondary btn-sm">Refresh</button>
+      </div>
+      <div id="nearest-list" class="card-list"></div>
+    </section>
+
+    <section id="view-walk-seq" class="view">
+      <div class="detail-header">
+        <h2>Walk Path</h2>
+        <p class="meta" id="walk-seq-meta">Photos in the order you took them — useful when you reconstruct the walk.</p>
+      </div>
+      <div id="walk-seq-list" class="card-list"></div>
+    </section>
+
+    <section id="view-cluster-review" class="view">
+      <div class="detail-header">
+        <h2 id="cluster-title">Suggested Areas</h2>
+        <p class="meta" id="cluster-meta">Grouped by GPS proximity. Rename them to match this plant.</p>
+      </div>
+      <div id="cluster-list" class="card-list"></div>
+      <div class="detail-actions">
+        <button id="btn-apply-clusters" class="btn-primary">Create Selected Areas</button>
+      </div>
+    </section>
+
+    <section id="view-ready-check" class="view">
+      <div class="detail-header">
+        <h2 id="ready-check-title">What's missing?</h2>
+        <p class="meta" id="ready-check-meta">Finish these before you leave the site so the office isn't chasing photos later.</p>
+      </div>
+      <div id="ready-list" class="card-list"></div>
+      <div class="detail-actions">
+        <button id="btn-ready-done" class="btn-primary">Back to Visit</button>
+      </div>
+    </section>
+  </main>
+
+  <div id="sticky-next" class="sticky-next hidden">
+    <div id="sticky-next-copy"></div>
+    <button type="button" id="btn-sticky-take" class="btn-primary btn-sm">Take</button>
+  </div>
+
+  <div id="more-sheet" class="more-sheet hidden">
+    <div class="more-backdrop" id="more-backdrop"></div>
+    <div class="more-panel" role="dialog" aria-label="More">
+      <div class="more-head">
+        <h2>More</h2>
+        <button type="button" class="btn-icon" id="btn-more-close" aria-label="Close">×</button>
+      </div>
+      <button type="button" class="more-item" id="more-highvis">High visibility</button>
+      <button type="button" class="more-item" id="more-defense">Defense mode (advanced)</button>
+      <button type="button" class="more-item" id="more-modeling">Modeling mode</button>
+      <button type="button" class="more-item" id="more-backup">Backup data</button>
+      <label for="restore-input" class="more-item">Restore backup</label>
+      <p class="help-text more-note">Oil & gas is the default. Defense mode is for modeling-ready capture if you need it later.</p>
+    </div>
+  </div>
+
+  <div id="modal-visit" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header"><h2 id="modal-visit-title">New Visit</h2><button class="btn-icon modal-close">×</button></div>
+      <div class="modal-body">
+        <div class="form-section"><label id="visit-title-label">Visit Title <span class="required">*</span></label><input type="text" id="visit-title" enterkeyhint="done" autocomplete="off" placeholder="e.g. Crude unit walkdown – May 12"></div>
+        <div class="form-section"><label>Client / Project</label><input type="text" id="visit-client" enterkeyhint="next" autocomplete="off" placeholder="Operator or project name"></div>
+        <div class="form-section"><label>Facility / unit</label><input type="text" id="visit-facility" enterkeyhint="next" autocomplete="off" placeholder="e.g. Bayou Refinery – Crude Unit"></div>
+        <div class="form-section"><label>Date</label><input type="date" id="visit-date"></div>
+        <div class="form-section"><label id="visit-template-label">What kind of visit?</label>
+          <div id="visit-kind-grid" class="kind-grid"></div>
+          <select id="visit-template" class="sr-only-select" aria-label="Visit type">
+            <option value="walkdown">Plant walkdown (best for first visit)</option>
+            <option value="rotating">Pumps & compressors</option>
+            <option value="tanks">Tanks, vessels & exchangers</option>
+            <option value="piping">Piping & pipe rack</option>
+            <option value="electrical">Electrical & instruments</option>
+            <option value="tar">Turnaround / shutdown</option>
+            <option value="mechanical">Mechanical (general)</option>
+            <option value="civil">Civil / structural</option>
+            <option value="general">General</option>
+            <option value="twin">Reality capture / scan support</option>
+          </select>
+          <p class="help-text">We’ll set up plant areas you can rename. Nothing is locked in.</p>
+        </div>
+        <div class="form-section"><label id="visit-notes-label">Overall Notes</label>
+          <div class="input-with-voice">
+            <textarea id="visit-notes" rows="3" placeholder="Weather, unit status, who you met, anything unusual…"></textarea>
+            <button type="button" class="btn-voice" id="btn-voice-visit-notes" aria-label="Record voice note">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><path d="M12 18v3"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary modal-close">Cancel</button>
+        <button id="btn-save-visit" class="btn-primary">Save Visit</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal-area" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header"><h2 id="modal-area-title">New Area</h2><button class="btn-icon modal-close-area">×</button></div>
+      <div class="modal-body">
+        <div class="form-section"><label>Area / Zone Name <span class="required">*</span></label><input type="text" id="area-name" placeholder="e.g. Pump alley"></div>
+        <div class="form-section"><label>Notes</label><textarea id="area-notes" rows="2" placeholder="Optional notes"></textarea></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary modal-close-area">Cancel</button>
+        <button id="btn-save-area" class="btn-primary">Save Area</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal-report" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header"><h2>Generate Report</h2><button class="btn-icon modal-close-report">×</button></div>
+      <div class="modal-body">
+        <div class="form-section"><label>Report Type</label>
+          <select id="report-type">
+            <option value="full">Full Detailed Report</option>
+            <option value="summary">Executive Summary</option>
+            <option value="exceptions">Exceptions Only</option>
+          </select>
+        </div>
+        <div class="form-section"><label>Company Name (branding)</label><input type="text" id="report-company" placeholder="Your company name"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary modal-close-report">Cancel</button>
+        <button id="btn-do-report" class="btn-primary">Generate PDF</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal-quick-eq" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header"><h2>New Equipment</h2><button class="btn-icon modal-close-qe">×</button></div>
+      <div class="modal-body">
+        <div class="form-section"><label>Equipment Tag <span class="required">*</span></label><input type="text" id="qe-tag" placeholder="e.g. P-101 or Charge pump"></div>
+        <div class="form-section"><label>Location Description</label><input type="text" id="qe-location" placeholder="Where is it?"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary modal-close-qe">Cancel</button>
+        <button id="btn-save-quick-eq" class="btn-primary">Create & Assign</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal-ai-key" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header"><h2>OpenAI API Key</h2><button class="btn-icon modal-close-ai">×</button></div>
+      <div class="modal-body">
+        <p class="help-text">Your key is stored only on this device. Used for optional photo analysis (GPT-4o vision).</p>
+        <div class="form-section">
+          <label>API Key</label>
+          <input type="password" id="ai-api-key" placeholder="sk-...">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary modal-close-ai">Cancel</button>
+        <button id="btn-save-ai-key" class="btn-primary">Save Key</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal-ai-result" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header"><h2>AI Analysis</h2><button class="btn-icon modal-close-ai-result">×</button></div>
+      <div class="modal-body">
+        <div id="ai-result-text" class="ai-result"></div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-ai-use-note" class="btn-secondary">Add to photo note</button>
+        <button class="btn-primary modal-close-ai-result">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <nav id="bottom-nav" class="bottom-nav">
+    <button class="nav-item active" data-nav="visits" id="nav-visits">
+      <span class="nav-icon" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/></svg></span>
+      <span class="nav-label" id="nav-visits-label">Visits</span>
+    </button>
+    <button class="nav-item" data-nav="site" id="nav-site" disabled>
+      <span class="nav-icon" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M3 21V8l6-4 6 4v13"/><path d="M9 21V12h6v9"/><path d="M21 21V10l-3-1.5"/></svg></span>
+      <span class="nav-label">This site</span>
+    </button>
+    <button class="nav-item" data-nav="photos" id="nav-photos">
+      <span class="nav-icon" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10.5" r="1.5"/><path d="m21 15-5-5L5 19"/></svg></span>
+      <span class="nav-label">Photos</span>
+    </button>
+    <button class="nav-item" data-nav="map" id="nav-map">
+      <span class="nav-icon" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M9 18l-6 3V6l6-3 6 3 6-3v15l-6 3-6-3z"/><path d="M9 3v15M15 6v15"/></svg></span>
+      <span class="nav-label">Map</span>
+    </button>
+  </nav>
+
+  <div id="toast" class="toast hidden"></div>

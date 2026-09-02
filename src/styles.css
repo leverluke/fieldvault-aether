@@ -1,0 +1,116 @@
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600&display=swap");
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0c0c0d;
+  --color-surface: #161513;
+  --color-elevated: #1f1d1a;
+  --color-fg: #ece7de;
+  --color-muted: #8d877c;
+  --color-primary: #d4a054;
+  --color-primary-foreground: #14110c;
+  --color-border: #2c2924;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --font-sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-display: "IBM Plex Serif", "Georgia", serif;
+  --font-mono: ui-monospace, "IBM Plex Mono", Menlo, monospace;
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  html,
+  body {
+    background: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    min-height: 100dvh;
+    overflow: auto;
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+}
+
+@layer utilities {
+  .a-line {
+    opacity: 0;
+    transform: translateY(18px);
+    filter: blur(5px);
+  }
+
+  .is-in .a-line {
+    animation: a-in 800ms var(--ease-out-expo) both;
+  }
+
+  .is-in .a-line:nth-child(1) {
+    animation-delay: 0ms;
+  }
+  .is-in .a-line:nth-child(2) {
+    animation-delay: 80ms;
+  }
+  .is-in .a-line:nth-child(3) {
+    animation-delay: 160ms;
+  }
+  .is-in .a-line:nth-child(4) {
+    animation-delay: 240ms;
+  }
+  .is-in .a-line:nth-child(5) {
+    animation-delay: 320ms;
+  }
+
+  .a-media {
+    opacity: 0;
+    transform: translateY(36px) scale(1.04);
+  }
+
+  .is-in .a-media {
+    animation: a-media 1100ms var(--ease-out-expo) both;
+    animation-delay: 140ms;
+  }
+}
+
+@keyframes a-in {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes a-media {
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .a-line,
+  .a-media,
+  .is-in .a-line,
+  .is-in .a-media {
+    animation: none;
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
