@@ -7,7 +7,8 @@ Phone-first site capture (FieldVault) and a browser cortex with eyes, craft, and
 | Path | What |
 |---|---|
 | `/` | Studio home — FieldVault, Aether mind |
-| `/apps/fieldvault` | Guided facility walkdowns, GPS (FixPlot), WalkScore, export |
+| `/apps/fieldvault` | About — preview widgets (capture, FixPlot, export) |
+| `/apps/fieldvault/play` | Walkdown — guided shots, GPS (FixPlot), WalkScore, export |
 | `/apps/aether` | Cortex: 14 subagents, mind diagram |
 | `/apps/aether/see` | Eyes — YOLO + COCO, ByteTrack IDs, teach, LOCK/COAST |
 | `/apps/aether/craft` | Hull-agnostic autopilot (air / water / ground) |

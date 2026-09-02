@@ -89,7 +89,8 @@ export const WORK: WorkItem[] = [
         body: "IndexedDB, compressed photos, a phone that still works when the radio dies.",
       },
     ],
-    cta: { label: "Open preview", href: "/apps/fieldvault" },
+    cta: { label: "Open preview", href: "/apps/fieldvault/play" },
+    playHref: "/apps/fieldvault/play",
   },
   {
     slug: "aether",
