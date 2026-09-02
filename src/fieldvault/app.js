@@ -1,4 +1,5 @@
 // @ts-nocheck
+import { L, JSZip } from "./libs.ts";
 /* FieldVault v3 – Expanded local-first version */
 /* FieldVault v3 – Expanded local-first version */
 const DB_NAME = 'FieldVaultDB';
