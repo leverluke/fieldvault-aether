@@ -31,6 +31,9 @@ let lastAiResult = '';
 let aiPhotoTargetId = null;
 
 let productMode = 'commercial';
+let pendingCameraAfterVisit = false;
+let stickyNextShotId = null;
+let latestVisitId = null;
 
 const COPY = {
   commercial: {
@@ -331,6 +334,35 @@ function armCameraCapture(shotId) {
   if (!cam) { showToast('Camera input missing'); return; }
   try { cam.value = ''; } catch (e) {}
   cam.click();
+}
+
+function startFastTake(shotId) {
+  restoreSession();
+  if (!currentVisitId && latestVisitId) currentVisitId = latestVisitId;
+  if (!currentVisitId) {
+    pendingCameraAfterVisit = true;
+    openVisitModal(false);
+    return;
+  }
+  startGpsWatch();
+  persistSession();
+  armCameraCapture(shotId || null);
+  reconcileEquipmentForVisit();
+}
+
+async function reconcileEquipmentForVisit() {
+  if (!currentEquipmentId || !currentVisitId) return;
+  try {
+    const eq = await dbGet(STORE_EQUIPMENT, currentEquipmentId);
+    if (!eq || eq.visitId !== currentVisitId) {
+      currentEquipmentId = null;
+      if ($('eq-tag')) $('eq-tag').value = '';
+      persistSession();
+    }
+  } catch (e) {
+    currentEquipmentId = null;
+    if ($('eq-tag')) $('eq-tag').value = '';
+  }
 }
 
 function shot(id, label, required, tip) {
@@ -667,28 +699,29 @@ function renderKindCards(selected) {
 function renderStickyNext(photos) {
   const bar = $('sticky-next');
   if (!bar) return;
-  const onEq = currentView === 'view-equipment-detail';
-  if (!onEq || isDefense()) {
+  if (currentView === 'view-markup') {
     bar.classList.add('hidden');
     document.body.classList.remove('has-sticky-next');
+    stickyNextShotId = null;
     return;
   }
   const shots = shotsFor(selectedEqType);
   const taken = guidedTypes(photos);
   const nxt = shots.find(s => s.required && !taken.has(s.id)) || shots.find(s => !taken.has(s.id));
-  if (!nxt) {
-    bar.classList.add('hidden');
-    document.body.classList.remove('has-sticky-next');
-    return;
-  }
+  const onEq = currentView === 'view-equipment-detail';
+  stickyNextShotId = onEq && nxt ? nxt.id : null;
   bar.classList.remove('hidden');
   document.body.classList.add('has-sticky-next');
   const copyEl = $('sticky-next-copy');
-  if (copyEl) copyEl.innerHTML = '<strong>Next photo</strong> ' + escapeHtml(nxt.label);
-  const take = $('btn-sticky-take');
-  if (take) take.onclick = () => {
-    armCameraCapture(nxt.id);
-  };
+  if (copyEl) {
+    if (!currentVisitId) {
+      copyEl.innerHTML = '<strong>Take</strong> Title once, then camera + GPS';
+    } else if (onEq && nxt) {
+      copyEl.innerHTML = '<strong>Next photo</strong> ' + escapeHtml(nxt.label);
+    } else {
+      copyEl.innerHTML = '<strong>Take</strong> Camera + GPS — no form';
+    }
+  }
 }
 
 async function renderCrumbs() {
@@ -902,9 +935,11 @@ function showView(viewId) {
   // Bottom nav: hide only on markup
   const hideNav = ['view-markup'];
   document.body.classList.toggle('hide-bottom-nav', hideNav.includes(viewId));
-  if (viewId !== 'view-equipment-detail') {
+  if (viewId === 'view-markup') {
     document.body.classList.remove('has-sticky-next');
     $('sticky-next')?.classList.add('hidden');
+  } else {
+    renderStickyNext(window.__fvCurrentPhotos || []);
   }
 
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
@@ -1148,6 +1183,7 @@ async function renderVisitsList(filter = '') {
   const equipment = await dbGetAll(STORE_EQUIPMENT);
   const areas = await dbGetAll(STORE_AREAS);
   visits.sort((a,b) => (b.updatedAt||0) - (a.updatedAt||0));
+  latestVisitId = visits[0] ? visits[0].id : null;
 
   const listEl = $('visits-list');
   const emptyEl = $('visits-empty');
@@ -1190,6 +1226,7 @@ async function renderVisitsList(filter = '') {
       loadVisitDetail(currentVisitId);
     });
   });
+  renderStickyNext(window.__fvCurrentPhotos || []);
 }
 
 function openVisitModal(edit=false) {
@@ -1212,6 +1249,7 @@ async function saveVisit() {
   if (!title) { showToast('Title required'); return; }
   const now = Date.now();
   const creating = !currentVisitId;
+  const armAfterCreate = creating && pendingCameraAfterVisit;
   let visit;
   if (!creating) {
     visit = await dbGet(STORE_VISITS, currentVisitId);
@@ -1234,6 +1272,12 @@ async function saveVisit() {
       createdAt: now, updatedAt: now
     };
     currentVisitId = visit.id;
+    latestVisitId = visit.id;
+    if (armAfterCreate) {
+      pendingCameraAfterVisit = false;
+      startGpsWatch();
+      armCameraCapture();
+    }
   }
   await dbPut(STORE_VISITS, visit);
   if (creating) await seedTemplateAreas(visit);
@@ -1305,6 +1349,7 @@ async function loadVisitDetail(id) {
       });
     });
   }
+  renderStickyNext(window.__fvCurrentPhotos || []);
 }
 
 function eqCardHtml(eq, areas) {
@@ -1925,6 +1970,11 @@ async function handlePhotoSelect(e) {
     showToast(shotName + ' saved' + (nxt ? ' · Next: ' + nxt.label : ' · Listed shots done'));
     persistSession();
     attachGpsToLatestPhotos(eq.id, images.length);
+    if (currentView === 'view-visit-detail' && currentVisitId) {
+      loadVisitDetail(currentVisitId);
+    } else {
+      renderStickyNext(eq.photos);
+    }
   } catch (err) {
     console.error(err);
     showToast('Photo did not save. Try one more time.');
@@ -2083,10 +2133,7 @@ async function saveMarkup() {
 }
 
 function openQuickCapture() {
-  qcPhotos = [];
-  showView('view-quick-capture');
-  $('header-title').textContent = 'Quick Capture';
-  updateQcUI();
+  startFastTake();
 }
 function updateQcUI() {
   $('qc-count').textContent = qcPhotos.length + ' photo' + (qcPhotos.length!==1?'s':'');
@@ -3069,6 +3116,7 @@ function initEvents() {
     renderCoach();
   });
   $('tile-add-eq')?.addEventListener('click', () => openNewEquipment(false));
+  $('btn-sticky-take')?.addEventListener('click', () => startFastTake(stickyNextShotId));
   $('tile-quick')?.addEventListener('click', openQuickCapture);
   $('tile-map')?.addEventListener('click', openMapView);
   $('tile-missing')?.addEventListener('click', openReadyCheck);
@@ -3080,7 +3128,10 @@ function initEvents() {
   });
   $('btn-highvis').addEventListener('click', toggleHighVis);
 
-  document.querySelectorAll('.modal-close').forEach(b => b.addEventListener('click', () => $('modal-visit').classList.add('hidden')));
+  document.querySelectorAll('.modal-close').forEach(b => b.addEventListener('click', () => {
+    pendingCameraAfterVisit = false;
+    $('modal-visit').classList.add('hidden');
+  }));
   document.querySelectorAll('.modal-close-area').forEach(b => b.addEventListener('click', () => $('modal-area').classList.add('hidden')));
   document.querySelectorAll('.modal-close-report').forEach(b => b.addEventListener('click', () => $('modal-report').classList.add('hidden')));
   document.querySelectorAll('.modal-close-qe').forEach(b => b.addEventListener('click', () => $('modal-quick-eq').classList.add('hidden')));
@@ -3240,6 +3291,7 @@ async function init() {
     const saved = localStorage.getItem('fieldvault_product_mode') === 'defense' ? 'defense' : 'commercial';
     applyProductMode(saved, { silent: true });
     restoreSession();
+    if (currentVisitId) latestVisitId = currentVisitId;
     showView('view-visits');
   } catch (err) {
     console.error(err);
