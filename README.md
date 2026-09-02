@@ -19,7 +19,7 @@ npm install
 npm run dev
 ```
 
-Dev server: `0.0.0.0:8080`.
+Dev server: `0.0.0.0:8080` (HTTP). Phone camera/GPS need https or localhost — not `http://<lan-ip>:8080`.
 
 ```bash
 npm run typecheck
@@ -39,6 +39,7 @@ npm run build
 - Twilio call bridge needs SID, token, from-number in Aether calling settings
 - Craft is a simulated hull in the tab, not MAVLink to a vehicle
 - Aether does not sit on the restaurant line — it drafts and hands you Call
+- Phone camera/GPS need a secure context. Test phones on https or localhost — not `http://<lan-ip>:8080`
 
 ## Layout
 
