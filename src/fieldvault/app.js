@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { L, JSZip } from "./libs.ts";
+import { L, JSZip, ensureFieldVaultLibs } from "./libs.ts";
 /* FieldVault v3 – Expanded local-first version */
 /* FieldVault v3 – Expanded local-first version */
 const DB_NAME = 'FieldVaultDB';
@@ -3249,6 +3249,7 @@ async function init() {
 }
 
 export async function initFieldVault() {
+  await ensureFieldVaultLibs();
   await init();
 }
 
