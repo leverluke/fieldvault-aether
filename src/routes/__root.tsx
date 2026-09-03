@@ -30,11 +30,12 @@ function Shell() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const play =
     pathname.endsWith("/play") || pathname.endsWith("/see") || pathname.endsWith("/craft");
+  const fieldvaultPlay = pathname === "/apps/fieldvault/play";
   if (play) {
     return (
       <>
         <Outlet />
-        <Aether />
+        {fieldvaultPlay ? null : <Aether />}
       </>
     );
   }

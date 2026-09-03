@@ -2210,6 +2210,7 @@ async function saveQuickEq() {
 }
 
 async function generatePDF() {
+  if (!window.jspdf || !window.jspdf.jsPDF) { showToast('PDF library not loaded'); return; }
   const type = $('report-type').value;
   const company = $('report-company').value.trim();
   $('modal-report').classList.add('hidden');
@@ -2384,6 +2385,7 @@ async function openMapView() {
 }
 
 async function initMap() {
+  if (typeof L === 'undefined') { showToast('Map library not loaded'); return; }
   const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
   const withGps = items.filter(e => e.lat != null && e.lng != null);
 
@@ -2658,6 +2660,7 @@ async function openGlobalMap() {
   const visitMap = Object.fromEntries(visits.map(v => [v.id, v]));
   const withGps = equipment.filter(e => e.lat != null && e.lng != null);
 
+  if (typeof L === 'undefined') { showToast('Map library not loaded'); return; }
   const container = $('global-map-container');
   if (!container) return;
   if (globalMapInstance) {
@@ -3249,6 +3252,163 @@ async function init() {
 
 export async function initFieldVault() {
   await init();
+}
+
+function demoShot(label, color) {
+  const c = document.createElement('canvas');
+  c.width = 640;
+  c.height = 400;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = color;
+  ctx.fillRect(0, 0, c.width, c.height);
+  ctx.fillStyle = 'rgba(0,0,0,0.28)';
+  ctx.fillRect(0, 0, c.width, 88);
+  ctx.fillStyle = '#eef2f5';
+  ctx.font = '600 28px "IBM Plex Sans", system-ui, sans-serif';
+  ctx.fillText(label, 24, 52);
+  ctx.font = '16px "IBM Plex Sans", system-ui, sans-serif';
+  ctx.fillStyle = '#c5d0d8';
+  ctx.fillText('FieldVault demo frame', 24, 78);
+  return c.toDataURL('image/jpeg', 0.72);
+}
+
+function demoPhoto(promptType, label, color, lat, lng) {
+  return {
+    id: uuid(),
+    dataUrl: demoShot(label, color),
+    promptType,
+    note: '',
+    lat,
+    lng,
+    capturedAt: Date.now()
+  };
+}
+
+export async function seedFieldVaultDemo() {
+  if (!db) await openDB();
+  const existing = await dbGetAll(STORE_VISITS);
+  if (existing.length) return false;
+
+  const now = Date.now();
+  const visitId = 'fv-demo-walkdown';
+  const areas = {
+    pumps: { id: 'fv-demo-area-pumps', visitId, name: 'Pump area', notes: 'Charge pumps at the crude unit.', createdAt: now, updatedAt: now },
+    vessels: { id: 'fv-demo-area-vessels', visitId, name: 'Vessels & exchangers', notes: 'Overhead drum and crude/resid exchanger.', createdAt: now, updatedAt: now },
+    rack: { id: 'fv-demo-area-rack', visitId, name: 'Pipe rack', notes: 'Battery-limit valves.', createdAt: now, updatedAt: now },
+    tanks: { id: 'fv-demo-area-tanks', visitId, name: 'Tank farm', notes: 'Suggested — no equipment tagged yet.', createdAt: now, updatedAt: now },
+    utils: { id: 'fv-demo-area-utils', visitId, name: 'Utilities', notes: 'Suggested — no equipment tagged yet.', createdAt: now, updatedAt: now }
+  };
+  const p101 = { lat: 29.7362, lng: -95.0128 };
+  const e210 = { lat: 29.7365, lng: -95.0134 };
+  const v301 = { lat: 29.7358, lng: -95.0131 };
+
+  await dbPut(STORE_VISITS, {
+    id: visitId,
+    title: 'Crude unit walkdown',
+    client: 'Gulf Coast Refining',
+    facility: 'Crude unit',
+    date: new Date().toISOString().slice(0, 10),
+    overallNotes: 'Sample visit for demos. P-101 is nearly leave-ready. XV-402 still needs photos and a GPS pin.',
+    template: 'walkdown',
+    createdAt: now,
+    updatedAt: now
+  });
+  for (const area of Object.values(areas)) await dbPut(STORE_AREAS, area);
+
+  await dbPut(STORE_EQUIPMENT, {
+    id: 'fv-demo-eq-p101',
+    visitId,
+    areaId: areas.pumps.id,
+    tag: 'P-101',
+    eqType: 'pump',
+    locationDesc: 'Charge pump at the crude unit inlet',
+    service: 'Crude charge',
+    pid: 'P&ID-CU-101',
+    mfr: 'Flowtec',
+    model: 'FT-80',
+    serial: 'A18422',
+    lat: p101.lat,
+    lng: p101.lng,
+    condition: 'Fair',
+    priority: 'Medium',
+    notes: 'Slight stain at the seal. Nameplate readable.',
+    needsFollowup: false,
+    photos: [
+      demoPhoto('overall', 'P-101 · overall', '#3d4f5c', p101.lat, p101.lng),
+      demoPhoto('tag', 'P-101 · nameplate', '#2c3a44', p101.lat, p101.lng),
+      demoPhoto('coupling', 'P-101 · coupling', '#4a5d4a', p101.lat, p101.lng),
+      demoPhoto('seal', 'P-101 · seal', '#5c4a3d', p101.lat, p101.lng)
+    ],
+    createdAt: now,
+    updatedAt: now
+  });
+  await dbPut(STORE_EQUIPMENT, {
+    id: 'fv-demo-eq-e210',
+    visitId,
+    areaId: areas.vessels.id,
+    tag: 'E-210',
+    eqType: 'exchanger',
+    locationDesc: 'Crude / resid exchanger, south bay',
+    service: 'Crude / resid',
+    pid: 'P&ID-CU-210',
+    lat: e210.lat,
+    lng: e210.lng,
+    condition: 'Good',
+    priority: 'Low',
+    notes: 'Wide and nameplate in. Detail shots still open.',
+    needsFollowup: false,
+    photos: [
+      demoPhoto('overall', 'E-210 · overall', '#3d4f5c', e210.lat, e210.lng),
+      demoPhoto('tag', 'E-210 · nameplate', '#2c3a44', e210.lat, e210.lng)
+    ],
+    createdAt: now,
+    updatedAt: now
+  });
+  await dbPut(STORE_EQUIPMENT, {
+    id: 'fv-demo-eq-v301',
+    visitId,
+    areaId: areas.vessels.id,
+    tag: 'V-301',
+    eqType: 'vessel',
+    locationDesc: 'Overhead drum, west of the exchanger bay',
+    service: 'Crude overhead',
+    pid: 'P&ID-CU-301',
+    lat: v301.lat,
+    lng: v301.lng,
+    condition: 'Poor',
+    priority: 'High',
+    recommendation: 'Follow-up on insulation and missing tag paint.',
+    notes: 'Wide shot only. Nameplate still missing.',
+    needsFollowup: true,
+    photos: [
+      demoPhoto('overall', 'V-301 · overall', '#4a3d3d', v301.lat, v301.lng)
+    ],
+    createdAt: now,
+    updatedAt: now
+  });
+  await dbPut(STORE_EQUIPMENT, {
+    id: 'fv-demo-eq-xv402',
+    visitId,
+    areaId: areas.rack.id,
+    tag: 'XV-402',
+    eqType: 'valve',
+    locationDesc: 'Battery-limit block on the charge line',
+    service: 'Crude charge',
+    pid: 'P&ID-CU-101',
+    lat: null,
+    lng: null,
+    condition: '',
+    priority: 'Urgent',
+    notes: 'No photos or GPS yet — good place to show Take and pin.',
+    needsFollowup: true,
+    photos: [],
+    createdAt: now,
+    updatedAt: now
+  });
+
+  await renderVisitsList();
+  showToast('Sample crude-unit walkdown loaded');
+  return true;
 }
 
   
