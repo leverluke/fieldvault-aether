@@ -169,6 +169,14 @@ export default defineConfig(({ command, isPreview }) => ({
         dirname(fileURLToPath(import.meta.url)),
         "scripts/stubs/mediapipe-pose.mjs",
       ),
+      // Same story: pose-detection statically imports the WebGPU backend, which
+      // is not installed (the app only ships CPU + WebGL via @tensorflow/tfjs)
+      // and is never selected. Redirect it to an inert stub so the optimizer
+      // resolves it deterministically.
+      "@tensorflow/tfjs-backend-webgpu": join(
+        dirname(fileURLToPath(import.meta.url)),
+        "scripts/stubs/tfjs-backend-webgpu.mjs",
+      ),
     },
   },
   plugins: [
