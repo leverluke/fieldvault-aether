@@ -1,0 +1,12 @@
+{
+  "name": "FieldVault + Aether",
+  "install": "npm ci --legacy-peer-deps",
+  "terminals": [
+    {
+      "name": "dev",
+      "command": "npm run dev",
+      "description": "TanStack Start + Vite dev server on http://0.0.0.0:8080"
+    }
+  ],
+  "ports": [{ "name": "dev server", "port": 8080 }]
+}

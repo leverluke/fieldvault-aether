@@ -1,5 +1,6 @@
 import { readdirSync } from "node:fs";
-import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import type { Plugin } from "vite";
 import { defineConfig } from "vite";
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
@@ -156,7 +157,28 @@ export default defineConfig(({ command, isPreview }) => ({
     port: 8081,
     strictPort: true,
   },
-  resolve: { tsconfigPaths: true },
+  resolve: {
+    tsconfigPaths: true,
+    alias: {
+      // `@tensorflow-models/pose-detection` statically imports `{ Pose }` from
+      // `@mediapipe/pose` for its optional BlazePose runtime. That package is a
+      // browser-global script with no module exports, so it cannot be bundled.
+      // This app only uses the MoveNet runtime (src/vision/pose.ts), so we
+      // redirect the specifier to a tiny stub that satisfies the import.
+      "@mediapipe/pose": join(
+        dirname(fileURLToPath(import.meta.url)),
+        "scripts/stubs/mediapipe-pose.mjs",
+      ),
+      // Same story: pose-detection statically imports the WebGPU backend, which
+      // is not installed (the app only ships CPU + WebGL via @tensorflow/tfjs)
+      // and is never selected. Redirect it to an inert stub so the optimizer
+      // resolves it deterministically.
+      "@tensorflow/tfjs-backend-webgpu": join(
+        dirname(fileURLToPath(import.meta.url)),
+        "scripts/stubs/tfjs-backend-webgpu.mjs",
+      ),
+    },
+  },
   plugins: [
     pgliteBootstrapPlugin(),
     // Before tanstackStart so /auth/popup never falls through to the SPA.
