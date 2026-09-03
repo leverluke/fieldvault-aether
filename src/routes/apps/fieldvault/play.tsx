@@ -2,9 +2,11 @@
 
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect } from "react";
-import { initFieldVault } from "@/fieldvault/app.js";
+import { initFieldVault, seedFieldVaultDemo } from "@/fieldvault/app.js";
+import { loadFieldVaultLibs } from "@/fieldvault/libs";
 import markup from "@/fieldvault/markup.html?raw";
 import "@/fieldvault/fieldvault.css";
+import "leaflet/dist/leaflet.css";
 
 export const Route = createFileRoute("/apps/fieldvault/play")({
   component: FieldVaultPlay,
@@ -15,7 +17,11 @@ function FieldVaultPlay() {
     const html = document.documentElement;
     html.classList.add("fv-active");
     document.body.classList.add("fv-active");
-    void initFieldVault();
+    void (async () => {
+      loadFieldVaultLibs();
+      await initFieldVault();
+      await seedFieldVaultDemo();
+    })();
     return () => {
       html.classList.remove("fv-active");
       document.body.classList.remove("fv-active");
