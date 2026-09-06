@@ -1,7 +1,21 @@
 // @ts-nocheck
 /* FieldVault v3 – Expanded local-first version */
 import { DB_NAME, DB_VERSION, STORE_AREAS, STORE_EQUIPMENT, STORE_PHOTOS, STORE_VISITS } from './schema.js';
-import { clusterByAccuracy, csvCell, isUntitledTag, nearestByGps, uniqueFacilities, walkGeoJson, walkLine } from './format.js';
+import {
+  attachPreviewText,
+  clusterByAccuracy,
+  compareEquipmentWalkOrder,
+  csvCell,
+  isUntitledTag,
+  hasDarkPhoto,
+  officePassItems,
+  officePassReasons,
+  rushShotType,
+  suggestAttachTarget,
+  uniqueFacilities,
+  walkGeoJson,
+  walkLine
+} from './format.js';
 import { blobToDataUrl, canvasJpegBlob, dataUrlToBlob, ingestPhotoFile } from './photos.ts';
 import { readNameplate } from './ocr-plate.ts';
 import { ensureFieldVaultLibs } from './libs.ts';
@@ -42,6 +56,8 @@ let showEmptyAreas = false;
 let camBusy = false;
 let cameraFallback = false;
 let sessionPinSeq = 0;
+let lastAttach = null;
+let gpsDenied = false;
 
 const COPY = {
   commercial: {
@@ -55,7 +71,7 @@ const COPY = {
     completenessTitle: 'How complete is this visit?',
     readyBtn: "What's missing?",
     readyHeader: "What's missing?",
-    readyMeta: "Finish these before you leave the site so the office isn't chasing photos later.",
+    readyMeta: "Name untitled pins, retake dark shots, then leave with the package.",
     readyAllGood: "You're good to leave",
     readyAllGoodBody: 'Required photos are in place. Generate the report when you are back.',
     readyBack: 'Back to Visit',
@@ -314,7 +330,10 @@ function persistSession() {
       eqId: currentEquipmentId,
       shot: pendingShotType,
       eqType: selectedEqType,
-      view: currentView
+      view: currentView,
+      camera: cameraOpen,
+      lastAttach,
+      sessionPinSeq
     }));
   } catch (e) {}
 }
@@ -327,8 +346,33 @@ function restoreSession() {
     if (s.eqId && !currentEquipmentId) currentEquipmentId = s.eqId;
     if (s.shot && !pendingShotType) pendingShotType = s.shot;
     if (s.eqType) selectedEqType = s.eqType;
+    if (s.lastAttach) lastAttach = s.lastAttach;
+    if (Number(s.sessionPinSeq)) sessionPinSeq = Number(s.sessionPinSeq);
     return s;
   } catch (e) { return null; }
+}
+
+async function restoreLastPlace(session) {
+  const view = session && session.view;
+  const visitOk = currentVisitId && await dbGet(STORE_VISITS, currentVisitId).catch(() => null);
+  if (visitOk && view && view !== 'view-visits' && view !== 'visits') {
+    if (view === 'view-visit-detail') {
+      showView('view-visit-detail');
+      await loadVisitDetail(currentVisitId);
+    } else if (view === 'view-equipment-detail' && currentEquipmentId) {
+      showView('view-equipment-detail');
+      await loadEquipmentDetail(currentEquipmentId);
+    } else if (view === 'view-ready-check') {
+      await openReadyCheck();
+    } else {
+      showView('view-visits');
+    }
+  } else {
+    showView('view-visits');
+  }
+  if (session && session.camera && visitOk) {
+    await openFieldCameraUi();
+  }
 }
 function setPendingShot(id) {
   pendingShotType = id || null;
@@ -336,12 +380,7 @@ function setPendingShot(id) {
 }
 
 function armCameraCapture(shotId) {
-  setPendingShot(shotId || null);
-  persistSession();
-  const cam = $('photo-input-cam') || $('photo-input');
-  if (!cam) { showToast('Camera input missing'); return; }
-  try { cam.value = ''; } catch (e) {}
-  cam.click();
+  startFastTake(shotId);
 }
 
 async function ensureVisitForCapture() {
@@ -389,7 +428,7 @@ async function startRushCapture(shotId) {
   setPendingShot(shotId || null);
   const id = await ensureVisitForCapture();
   if (!id) return;
-  if (currentView !== 'view-equipment-detail') {
+  if (currentView !== 'view-equipment-detail' && !shotId) {
     currentEquipmentId = null;
     persistSession();
   }
@@ -402,14 +441,44 @@ async function startRushCapture(shotId) {
 
 function updateCamChrome() {
   if ($('fv-cam-count')) $('fv-cam-count').textContent = String(sessionShotCount);
-  if ($('fv-cam-gps')) $('fv-cam-gps').textContent = lastFix ? gpsStatusText(lastFix) : 'GPS…';
-  if ($('fv-cam-hint')) {
-    $('fv-cam-hint').textContent = forceNewPin
-      ? 'Next snap starts a new pin.'
-      : cameraFallback
-        ? 'No live camera here — shutter still pins GPS.'
-        : 'Stand at the asset. Snap. Keep walking.';
+  if ($('fv-cam-gps')) {
+    $('fv-cam-gps').textContent = gpsDenied ? 'GPS blocked' : (lastFix ? gpsStatusText(lastFix) : 'GPS…');
   }
+  const n = lastAttach?.photoCount;
+  if ($('fv-cam-hint')) {
+    if (forceNewPin) $('fv-cam-hint').textContent = 'Next snap starts a new pin.';
+    else if (n === 1) $('fv-cam-hint').textContent = 'Nameplate — fill the frame.';
+    else if (cameraFallback) $('fv-cam-hint').textContent = 'No live camera here — shutter still pins GPS.';
+    else $('fv-cam-hint').textContent = 'Stand at the asset. Snap. Keep walking.';
+  }
+  void refreshCamAttachPreview();
+}
+
+async function previewAttachSuggestion() {
+  const items = currentVisitId ? await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId) : [];
+  let lastPin = null;
+  if (lastAttach?.id) lastPin = items.find((e) => e.id === lastAttach.id) || lastAttach;
+  if (currentView === 'view-equipment-detail' && currentEquipmentId) {
+    lastPin = items.find((e) => e.id === currentEquipmentId) || lastPin;
+  }
+  return suggestAttachTarget({
+    items,
+    lat: lastFix?.lat ?? lastAttach?.lat,
+    lng: lastFix?.lng ?? lastAttach?.lng,
+    acc: lastFix?.acc ?? lastAttach?.acc,
+    forceNew: forceNewPin,
+    lastPin,
+    lastShotAt: lastAttach?.at,
+    lockCurrent: currentView === 'view-equipment-detail' && !!pendingShotType
+  });
+}
+
+async function refreshCamAttachPreview() {
+  if (!cameraOpen) return;
+  try {
+    const suggestion = await previewAttachSuggestion();
+    updateCamAttach(attachPreviewText(suggestion));
+  } catch (e) {}
 }
 
 async function openFieldCameraUi() {
@@ -541,27 +610,27 @@ async function createUntitledPin(fix) {
 }
 
 async function resolveAttachTarget(fix) {
-  if (currentVisitId && currentEquipmentId && !forceNewPin) {
-    const cur = await dbGet(STORE_EQUIPMENT, currentEquipmentId);
-    if (cur && cur.visitId === currentVisitId) return { eq: cur, how: 'current' };
-  }
-  const items = currentVisitId ? await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId) : [];
-  if (!forceNewPin && fix && fix.lat != null && fix.lng != null) {
-    const maxM = Math.max(18, Number(fix.acc) * 1.1 || 18);
-    const near = nearestByGps(items, fix.lat, fix.lng, maxM);
-    if (near) return { eq: near.eq, how: 'near', dist: near.dist };
+  const suggestion = await previewAttachSuggestion();
+  if (suggestion.how === 'current' || suggestion.how === 'near') {
+    const id = suggestion.eq && suggestion.eq.id;
+    const eq = id ? await dbGet(STORE_EQUIPMENT, id) : null;
+    if (eq && eq.visitId === currentVisitId) {
+      forceNewPin = false;
+      return { eq, how: suggestion.how, dist: suggestion.dist, reason: suggestion.reason };
+    }
   }
   forceNewPin = false;
-  return { eq: await createUntitledPin(fix), how: 'pin' };
+  return { eq: await createUntitledPin(fix), how: 'pin', reason: suggestion.reason, moved: suggestion.moved };
 }
 
 async function addPhotoToEquipment(eq, shot) {
   eq.photos = eq.photos || [];
-  const autoType = pendingShotType || nextMissingPromptType(eq.photos, eq.eqType || selectedEqType);
+  const autoType = rushShotType(eq.photos, pendingShotType) || nextMissingPromptType(eq.photos, eq.eqType || selectedEqType);
   let blobId;
   try {
     blobId = await putPhotoBlob(shot.blob, shot.mime);
   } catch (err) {
+    if (isQuotaError(err)) throw err;
     const smaller = await ingestPhotoFile(new File([shot.blob], 'photo.jpg', { type: 'image/jpeg' }), { quality: 0.52, maxDim: 1024 });
     blobId = await putPhotoBlob(smaller.blob, smaller.mime);
   }
@@ -586,7 +655,9 @@ async function addPhotoToEquipment(eq, shot) {
   }
   eq.updatedAt = Date.now();
   await dbPut(STORE_EQUIPMENT, eq);
-  if (autoType === 'tag') void applyNameplateOcr(eq.id, shot.blob);
+  if (autoType === 'tag' || (isUntitledTag(eq.tag) && eq.photos.length >= 2)) {
+    void applyNameplateOcr(eq.id, shot.blob);
+  }
   return { rec, autoType };
 }
 
@@ -604,10 +675,19 @@ async function smartAttachPhoto(shot) {
   const target = await resolveAttachTarget(fix);
   const { rec, autoType } = await addPhotoToEquipment(target.eq, shot);
   setPendingShot(null);
-  persistSession();
-  attachGpsToLatestPhotos(target.eq.id, 1);
   lastCapturedEqId = target.eq.id;
   currentEquipmentId = target.eq.id;
+  lastAttach = {
+    id: target.eq.id,
+    lat: rec.lat ?? target.eq.lat ?? fix?.lat,
+    lng: rec.lng ?? target.eq.lng ?? fix?.lng,
+    acc: rec.gpsAcc ?? target.eq.gpsAcc ?? fix?.acc,
+    at: Date.now(),
+    photoCount: (target.eq.photos || []).length,
+    tag: target.eq.tag
+  };
+  persistSession();
+  attachGpsToLatestPhotos(target.eq.id, 1);
   if (currentView === 'view-equipment-detail' && !cameraOpen) {
     const fresh = await dbGet(STORE_EQUIPMENT, target.eq.id);
     if (fresh) {
@@ -622,13 +702,19 @@ async function smartAttachPhoto(shot) {
   } else if (currentView === 'view-visit-detail' && currentVisitId && !cameraOpen) {
     loadVisitDetail(currentVisitId);
   }
-  const meters = target.dist != null ? Math.round(target.dist) : null;
+  const meters = target.dist != null ? Math.round(target.dist) : (target.moved != null ? Math.round(target.moved) : null);
   let message;
-  if (target.how === 'pin') message = target.eq.tag + ' · tap Name when you can';
-  else if (target.how === 'near') message = 'Added to ' + target.eq.tag + (meters != null ? ' · ' + meters + ' m' : '');
-  else message = 'Added to ' + target.eq.tag;
+  if (target.how === 'pin') {
+    message = target.eq.tag + (target.reason === 'moved' && meters != null ? ' · moved ' + meters + ' m' : ' · tap Name when you can');
+  } else if (target.how === 'near') {
+    message = 'Added to ' + target.eq.tag + (meters != null ? ' · ' + meters + ' m' : '');
+  } else {
+    message = 'Added to ' + target.eq.tag;
+  }
   const shotName = autoType ? shotLabel(autoType, target.eq.eqType) : 'Photo';
-  return { eq: target.eq, rec, message: message + ' · ' + shotName };
+  if (autoType === 'overall') message += ' · next: nameplate';
+  else message += ' · ' + shotName;
+  return { eq: target.eq, rec, message };
 }
 
 function openNamePinModal() {
@@ -663,6 +749,8 @@ async function saveNamePin() {
   updateCamAttach('Adding to ' + eq.tag);
   showToast('Named ' + eq.tag);
   if (currentView === 'view-visit-detail') loadVisitDetail(currentVisitId);
+  if (currentView === 'view-ready-check') openReadyCheck();
+  if (currentView === 'view-walk-seq') openWalkSequence();
   if (currentView === 'view-equipment-detail' && $('eq-tag')) {
     $('eq-tag').value = eq.tag;
     if ($('header-title')) $('header-title').textContent = eq.tag;
@@ -949,7 +1037,7 @@ async function renderShotGuide(photos) {
   list.querySelectorAll('.btn-shot-cam').forEach(b => {
     b.addEventListener('click', (ev) => {
       ev.preventDefault();
-      armCameraCapture(b.dataset.shot);
+      startFastTake(b.dataset.shot);
     });
   });
   list.querySelectorAll('.shot-thumb[data-photoid]').forEach(b => {
@@ -973,7 +1061,9 @@ function renderEqTypeFilter(items) {
   }
   const used = OG_TYPE_ORDER.filter(id => counts[id]);
   if (!used.length) { wrap.innerHTML = ''; return; }
+  const needN = officePassItems(items.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) }))).length;
   wrap.innerHTML = `<button type="button" class="chip ${eqTypeFilter==='all'?'active':''}" data-filter="all">All</button>` +
+    (needN ? `<button type="button" class="chip ${eqTypeFilter==='needs'?'active':''}" data-filter="needs">To finish ${needN}</button>` : '') +
     used.map(id => `<button type="button" class="chip ${eqTypeFilter===id?'active':''}" data-filter="${id}">${escapeHtml(OG_TYPES[id].label)} ${counts[id]}</button>`).join('');
   wrap.querySelectorAll('.chip').forEach(c => {
     c.addEventListener('click', () => {
@@ -1098,7 +1188,7 @@ async function renderEqPager() {
     return;
   }
   const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
-  items.sort((a,b) => (a.tag||'').localeCompare(b.tag||''));
+  items.sort(compareEquipmentWalkOrder);
   const idx = items.findIndex(e => e.id === currentEquipmentId);
   if (items.length < 2 || idx < 0) { bar.classList.add('hidden'); return; }
   bar.classList.remove('hidden');
@@ -1230,9 +1320,19 @@ function dbGetAll(store) {
     req.onerror = () => rej(req.error);
   });
 }
+function isQuotaError(err) {
+  return !!(err && (err.name === 'QuotaExceededError' || err.code === 22));
+}
 async function putPhotoBlob(blob, mime) {
   const rec = { id: uuid(), blob, mime: mime || blob.type || 'image/jpeg', createdAt: Date.now() };
-  await dbPut(STORE_PHOTOS, rec);
+  try {
+    await dbPut(STORE_PHOTOS, rec);
+  } catch (err) {
+    if (isQuotaError(err)) {
+      showToast('Phone storage is full. Export a visit, then delete old ones.');
+    }
+    throw err;
+  }
   return rec.id;
 }
 
@@ -1821,7 +1921,7 @@ async function loadVisitDetail(id) {
   const areas = await dbGetByIndex(STORE_AREAS, 'visitId', id);
   const equipment = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', id);
   areas.sort((a,b) => (a.name||'').localeCompare(b.name||''));
-  equipment.sort((a,b) => (a.tag||'').localeCompare(b.tag||''));
+  equipment.sort(compareEquipmentWalkOrder);
 
   renderCompleteness(equipment);
 
@@ -1864,7 +1964,12 @@ async function loadVisitDetail(id) {
   }
 
   renderEqTypeFilter(equipment);
-  const shown = eqTypeFilter === 'all' ? equipment : equipment.filter(e => (e.eqType || 'other') === eqTypeFilter);
+  const forPass = equipment.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) }));
+  const shown = eqTypeFilter === 'all'
+    ? equipment
+    : eqTypeFilter === 'needs'
+      ? officePassItems(forPass)
+      : equipment.filter(e => (e.eqType || 'other') === eqTypeFilter);
   const eqList = $('equipment-list');
   if (equipment.length === 0) {
     eqList.innerHTML = `<div class="next-step-card">
@@ -1935,6 +2040,10 @@ function renderCompleteness(items) {
   if (items.length - withGuided > 0) warnings.push(c.missingGuided(items.length - withGuided));
   if (needsFollowup) warnings.push(needsFollowup + (isDefense() ? ' flagged for more reference photos' : ' flagged for follow-up'));
   if (items.length - withCoords > 0) warnings.push(c.missingGps(items.length - withCoords));
+  const untitled = items.filter((e) => isUntitledTag(e.tag)).length;
+  const dark = items.filter((e) => hasDarkPhoto(e)).length;
+  if (untitled) warnings.push(untitled + ' still need a name');
+  if (dark) warnings.push(dark + ' dark photo' + (dark === 1 ? '' : 's') + ' to retake');
   $('completeness-warnings').innerHTML = warnings.map(w => '<div>'+w+'</div>').join('');
 }
 
@@ -1944,37 +2053,61 @@ async function openReadyCheck() {
   $('header-title').textContent = isDefense() ? 'Processing Check' : 'Punch list';
   const list = $('ready-list');
   const c = copy();
-  const hard = items.filter(e => {
-    if (isDefense()) {
-      return !(e.photos||[]).length || e.needsFollowup || e.lat==null || !hasRequiredViews(e);
-    }
-    return !(e.photos||[]).length || e.needsFollowup || missingRequiredShots(e).length > 0;
-  });
-  const gpsOnly = items.filter(e => !hard.includes(e) && e.lat==null);
+  const annotated = items.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) }));
+  const hard = officePassItems(annotated);
   if (hard.length === 0) {
-    const gpsNote = gpsOnly.length
-      ? `<p>${gpsOnly.length} item${gpsOnly.length===1?'':'s'} have no map pin — optional, but useful if you want locations on the map.</p>`
-      : '';
-    list.innerHTML = `<div class="empty-state"><h2>${escapeHtml(c.readyAllGood)}</h2><p>${escapeHtml(c.readyAllGoodBody)}</p>${gpsNote}</div>`;
+    list.innerHTML = `<div class="empty-state"><h2>${escapeHtml(c.readyAllGood)}</h2><p>${escapeHtml(c.readyAllGoodBody)}</p>
+      <button type="button" class="btn-primary btn-lg" id="btn-leave-clean">Leave site — share package</button></div>`;
+    $('btn-leave-clean')?.addEventListener('click', () => void leaveSite({ force: true }));
     return;
   }
   const cards = hard.map(eq => {
-    const issues = [];
+    const reasons = officePassReasons(eq);
+    const untitled = reasons.some((r) => r.id === 'untitled');
+    const dark = reasons.some((r) => r.id === 'dark');
     const miss = missingRequiredShots(eq);
-    if (!(eq.photos||[]).length) issues.push('No photos yet');
-    else if (miss.length) issues.push('Still needs: ' + miss.map(s => s.label).join(', '));
-    if (eq.needsFollowup) issues.push(isDefense() ? 'More reference photos needed' : 'Follow-up flagged');
-    if (isDefense() && eq.lat==null) issues.push('No GPS');
-    return `<div class="card danger-border" data-id="${eq.id}">
+    const retakeShot = dark ? (eq.photos || []).find((p) => /dark/i.test(p.note || ''))?.promptType || 'overall' : (miss[0] && miss[0].id) || '';
+    return `<div class="card danger-border punch-card" data-id="${eq.id}">
       <div class="card-title"><span class="tag-badge">${escapeHtml(eq.tag||'?')}</span></div>
-      <div class="card-meta">${issues.join(' · ')}</div>
-      ${eq.needsFollowup ? `<button type="button" class="btn-secondary btn-sm punch-close" data-close="${eq.id}">Close follow-up</button>` : ''}
+      <div class="card-meta">${reasons.map((r) => r.label).join(' · ')}</div>
+      ${untitled ? `<div class="punch-rename-row">
+        <input type="text" class="punch-rename" data-id="${eq.id}" placeholder="e.g. P-101" enterkeyhint="done">
+        <button type="button" class="btn-primary btn-sm punch-save-name" data-id="${eq.id}">Name</button>
+      </div>` : ''}
+      <div class="punch-actions">
+        ${retakeShot ? `<button type="button" class="btn-secondary btn-sm punch-retake" data-id="${eq.id}" data-shot="${retakeShot}">Retake</button>` : ''}
+        ${eq.needsFollowup ? `<button type="button" class="btn-secondary btn-sm punch-close" data-close="${eq.id}">Close follow-up</button>` : ''}
+      </div>
     </div>`;
   }).join('');
   list.innerHTML = cards;
+  list.querySelectorAll('.punch-save-name').forEach((b) => {
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      void savePunchName(b.dataset.id, list.querySelector('.punch-rename[data-id="' + b.dataset.id + '"]')?.value);
+    });
+  });
+  list.querySelectorAll('.punch-rename').forEach((inp) => {
+    inp.addEventListener('click', (ev) => ev.stopPropagation());
+    inp.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        void savePunchName(inp.dataset.id, inp.value);
+      }
+    });
+  });
+  list.querySelectorAll('.punch-retake').forEach((b) => {
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      currentEquipmentId = b.dataset.id;
+      lastCapturedEqId = b.dataset.id;
+      persistSession();
+      startFastTake(b.dataset.shot || null);
+    });
+  });
   list.querySelectorAll('.card').forEach(card => {
     card.addEventListener('click', (ev) => {
-      if (ev.target.closest('[data-close]')) return;
+      if (ev.target.closest('button, input')) return;
       currentEquipmentId = card.dataset.id;
       showView('view-equipment-detail');
       loadEquipmentDetail(currentEquipmentId);
@@ -1992,6 +2125,31 @@ async function openReadyCheck() {
       openReadyCheck();
     });
   });
+}
+
+async function savePunchName(id, raw) {
+  const tag = String(raw || '').trim();
+  if (!id || !tag) { showToast('Type a tag'); return; }
+  const eq = await dbGet(STORE_EQUIPMENT, id);
+  if (!eq) return;
+  eq.tag = tag;
+  eq.updatedAt = Date.now();
+  await dbPut(STORE_EQUIPMENT, eq);
+  showToast('Named ' + tag);
+  openReadyCheck();
+}
+
+async function leaveSite(opts = {}) {
+  if (!currentVisitId) { showToast('Open a visit first'); return; }
+  const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
+  const annotated = items.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) }));
+  const open = officePassItems(annotated);
+  if (open.length && !(opts && opts.force)) {
+    showToast(open.length + ' still open — name or retake, then leave');
+    openReadyCheck();
+    return;
+  }
+  await exportVisitPackage({ share: true });
 }
 
 async function deleteVisit() {
@@ -2252,6 +2410,7 @@ function loadCachedFix() {
   } catch (e) {}
 }
 function saveFix(pos) {
+  gpsDenied = false;
   lastFix = {
     lat: pos.coords.latitude,
     lng: pos.coords.longitude,
@@ -2284,7 +2443,17 @@ function gpsStatusText(fix) {
 function updateGpsStatusUi() {
   const el = $('gps-status');
   if (el) el.textContent = lastFix ? gpsStatusText(lastFix) : 'Tap GPS to capture this spot';
-  if ($('fv-cam-gps')) $('fv-cam-gps').textContent = lastFix ? gpsStatusText(lastFix) : 'GPS…';
+  if ($('fv-cam-gps')) {
+    $('fv-cam-gps').textContent = gpsDenied ? 'GPS blocked' : (lastFix ? gpsStatusText(lastFix) : 'GPS…');
+  }
+  renderGpsBanner();
+  if (cameraOpen) void refreshCamAttachPreview();
+}
+
+function renderGpsBanner() {
+  const el = $('fv-gps-banner');
+  if (!el) return;
+  el.classList.toggle('hidden', !gpsDenied);
 }
 function applyFixToForm(fix) {
   if (!fix) return;
@@ -2326,7 +2495,11 @@ async function locate(opts = {}) {
     refine();
     return lastFix;
   } catch (e) {
-    if (e && e.code === 1) throw e;
+    if (e && e.code === 1) {
+      gpsDenied = true;
+      renderGpsBanner();
+      throw e;
+    }
   }
 
   try {
@@ -2337,6 +2510,10 @@ async function locate(opts = {}) {
     });
     return saveFix(pos);
   } catch (e) {
+    if (e && e.code === 1) {
+      gpsDenied = true;
+      renderGpsBanner();
+    }
     if (lastFix && Date.now() - lastFix.at < 15 * 60 * 1000) return lastFix;
     throw e;
   }
@@ -2346,7 +2523,13 @@ function startGpsWatch() {
   try {
     gpsWatchId = navigator.geolocation.watchPosition(
       pos => saveFix(pos),
-      () => {},
+      (err) => {
+        if (err && err.code === 1) {
+          gpsDenied = true;
+          renderGpsBanner();
+          updateCamChrome();
+        }
+      },
       { enableHighAccuracy: true, maximumAge: 4000, timeout: 25000 }
     );
   } catch (e) {}
@@ -2878,6 +3061,7 @@ async function generatePDF() {
       if (eq.priority) { doc.text('Priority: ' + eq.priority, margin, y); y += 13; }
       if (eq.recommendation) { doc.text('Recommendation: ' + eq.recommendation, margin, y); y += 13; }
       if (eq.needsFollowup) { doc.setTextColor(180,100,0); doc.text('⚑ Needs follow-up', margin, y); doc.setTextColor(0); y += 13; }
+      if ((eq.voiceNotes || []).length) { doc.text('Voice notes: ' + eq.voiceNotes.length, margin, y); y += 13; }
       if (eq.notes) {
         const ns = doc.splitTextToSize('Notes: ' + eq.notes, contentW);
         doc.text(ns, margin, y); y += ns.length*12 + 6;
@@ -3465,16 +3649,26 @@ async function openWalkSequence() {
     const time = ev.t ? new Date(ev.t).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}) : '—';
     const thumb = ev.photo ? `<img src="${ev.photo._url || ev.photo.dataUrl || ''}" alt="" style="width:56px;height:56px;object-fit:cover;border-radius:8px">` : '';
     return `<div class="card" data-id="${ev.eq.id}">
-      <div class="card-title">${i+1}. <span class="tag-badge">${escapeHtml(ev.eq.tag||'')}</span></div>
+      <div class="card-title">${i+1}. <span class="tag-badge">${escapeHtml(ev.eq.tag||'')}</span>${isUntitledTag(ev.eq.tag) ? ' <span class="untitled-hint">Untitled</span>' : ''}</div>
       <div class="card-meta">
         <span class="walk-time">${time}</span>
         ${ev.eq.lat!=null ? `<span class="coords-display">${Number(ev.eq.lat).toFixed(5)}, ${Number(ev.eq.lng).toFixed(5)}</span>` : ''}
       </div>
       ${thumb}
+      ${isUntitledTag(ev.eq.tag) ? `<button type="button" class="btn-secondary btn-sm walk-name" data-id="${ev.eq.id}">Name</button>` : ''}
     </div>`;
   }).join('');
+  list.querySelectorAll('.walk-name').forEach((b) => {
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      lastCapturedEqId = b.dataset.id;
+      currentEquipmentId = b.dataset.id;
+      openNamePinModal();
+    });
+  });
   list.querySelectorAll('.card').forEach(c => {
-    c.addEventListener('click', () => {
+    c.addEventListener('click', (ev) => {
+      if (ev.target.closest('button')) return;
       currentEquipmentId = c.dataset.id;
       showView('view-equipment-detail');
       loadEquipmentDetail(currentEquipmentId);
@@ -3560,6 +3754,7 @@ async function exportVisitPackage(opts = {}) {
       locationDesc: e.locationDesc, lat: e.lat, lng: e.lng,
       notes: e.notes, photoCount: (e.photos||[]).length,
       photoTypes: (e.photos||[]).map(p => p.promptType).filter(Boolean),
+      voiceCount: (e.voiceNotes || []).length,
       readiness: equipmentReadiness(e)
     }))
   };
@@ -3568,6 +3763,17 @@ async function exportVisitPackage(opts = {}) {
     walkScore: visitReadinessScore(items)
   }, null, 2));
   zip.file('visit.geojson', JSON.stringify(walkGeoJson({ ...visit, readiness: visitReadinessScore(items) }, items.map((e) => ({ ...e, readiness: equipmentReadiness(e) })), areas), null, 2));
+  let voiceIdx = 1;
+  for (const eq of items) {
+    for (const note of eq.voiceNotes || []) {
+      const src = note.dataUrl || '';
+      const data = src.split(',')[1];
+      if (!data) continue;
+      const ext = src.includes('audio/webm') ? 'webm' : src.includes('audio/mp4') ? 'm4a' : 'webm';
+      zip.file('voice/' + safeName(eq.tag) + '_' + voiceIdx + '.' + ext, data, { base64: true });
+      voiceIdx++;
+    }
+  }
   if (isDefense()) {
     zip.file('README.txt', [
       'FieldVault ground-truth / digital-twin package',
@@ -3872,6 +4078,13 @@ function initEvents() {
   $('btn-walk-seq')?.addEventListener('click', openWalkSequence);
   $('btn-export-package')?.addEventListener('click', exportVisitPackage);
   $('btn-share-package')?.addEventListener('click', shareVisitPackage);
+  $('btn-leave-site')?.addEventListener('click', () => void leaveSite());
+  $('btn-leave-site-ready')?.addEventListener('click', () => void leaveSite());
+  $('btn-gps-retry')?.addEventListener('click', () => {
+    gpsDenied = false;
+    renderGpsBanner();
+    captureGps({ toast: true, fresh: true });
+  });
   $('btn-walk-again')?.addEventListener('click', () => walkAgainFrom(currentVisitId));
   $('btn-backup')?.addEventListener('click', backupAllData);
   $('restore-input')?.addEventListener('change', (e) => {
@@ -3908,9 +4121,9 @@ async function init() {
     }
     const saved = localStorage.getItem('fieldvault_product_mode') === 'defense' ? 'defense' : 'commercial';
     applyProductMode(saved, { silent: true });
-    restoreSession();
+    const session = restoreSession();
     if (currentVisitId) latestVisitId = currentVisitId;
-    showView('view-visits');
+    await restoreLastPlace(session);
   } catch (err) {
     console.error(err);
     alert('Failed to start FieldVault');

@@ -14,6 +14,15 @@ export async function requestWalkWake() {
   }
 }
 
+export function bindWalkWake() {
+  if (typeof document === "undefined") return;
+  if (document.documentElement.dataset.fvWake === "1") return;
+  document.documentElement.dataset.fvWake = "1";
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") void requestWalkWake();
+  });
+}
+
 export async function releaseWalkWake() {
   try {
     if (sentinel) {

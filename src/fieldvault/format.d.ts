@@ -27,6 +27,31 @@ export function nearestByGps<T extends { lat?: number | null; lng?: number | nul
   maxM?: number,
 ): { eq: T; dist: number } | null;
 export function isUntitledTag(tag: string): boolean;
+export const ATTACH_BASE_M: number;
+export const SPLIT_MOVE_M: number;
+export const SPLIT_WAIT_MS: number;
+export function attachRadiusM(acc?: number, base?: number): number;
+export function splitDistanceM(acc?: number): number;
+export function pinNumber(tag: string): number | null;
+export function compareTags(a: string, b: string): number;
+export function firstCaptureAt(eq: { photos?: Array<{ capturedAt?: number }>; createdAt?: number; updatedAt?: number }): number;
+export function compareEquipmentWalkOrder(a: unknown, b: unknown): number;
+export function hasDarkPhoto(eq: { photos?: Array<{ note?: string }> }): boolean;
+export function officePassReasons(eq: unknown): Array<{ id: string; label: string }>;
+export function officePassItems<T>(items: T[]): T[];
+export function rushShotType(photos: unknown[], pending?: string | null): string | null;
+export function suggestAttachTarget(opts: {
+  items?: unknown[];
+  lat?: number | null;
+  lng?: number | null;
+  acc?: number;
+  forceNew?: boolean;
+  lastPin?: { id?: string; lat?: number | null; lng?: number | null; tag?: string; photos?: unknown[] } | null;
+  lastShotAt?: number | null;
+  now?: number;
+  lockCurrent?: boolean;
+}): { how: "pin" | "current" | "near"; reason: string; eq?: unknown; dist?: number | null; moved?: number };
+export function attachPreviewText(suggestion: unknown): string;
 export function facilityKey(visit: { client?: string; facility?: string }): string;
 export function uniqueFacilities(visits: Array<{ client?: string; facility?: string }>): Array<{
   client: string;

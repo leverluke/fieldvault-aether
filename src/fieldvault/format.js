@@ -162,6 +162,141 @@ export function isUntitledTag(tag) {
   return /^(pin|pump|valve|tank|other|untitled)\s*\d*$/i.test(String(tag || "").trim());
 }
 
+export const ATTACH_BASE_M = 18;
+export const SPLIT_MOVE_M = 10;
+export const SPLIT_WAIT_MS = 75000;
+
+export function attachRadiusM(acc, base = ATTACH_BASE_M) {
+  return Math.max(base, Number(acc) * 1.1 || base);
+}
+
+export function splitDistanceM(acc) {
+  return Math.max(SPLIT_MOVE_M, (Number(acc) || 0) * 0.85);
+}
+
+export function pinNumber(tag) {
+  const m = /^(?:pin|untitled)\s+(\d+)$/i.exec(String(tag || "").trim());
+  return m ? Number(m[1]) : null;
+}
+
+export function compareTags(a, b) {
+  const na = pinNumber(a);
+  const nb = pinNumber(b);
+  if (na != null && nb != null && na !== nb) return na - nb;
+  return String(a || "").localeCompare(String(b || ""), undefined, { numeric: true, sensitivity: "base" });
+}
+
+export function firstCaptureAt(eq) {
+  const times = (eq?.photos || []).map((p) => p.capturedAt || 0).filter(Boolean);
+  if (times.length) return Math.min(...times);
+  return eq?.createdAt || eq?.updatedAt || 0;
+}
+
+export function compareEquipmentWalkOrder(a, b) {
+  const d = firstCaptureAt(a) - firstCaptureAt(b);
+  if (d) return d;
+  return compareTags(a?.tag, b?.tag);
+}
+
+export function hasDarkPhoto(eq) {
+  return (eq?.photos || []).some((p) => /dark/i.test(String(p.note || "")));
+}
+
+export function officePassReasons(eq) {
+  const reasons = [];
+  if (isUntitledTag(eq?.tag)) reasons.push({ id: "untitled", label: "Needs a name" });
+  if (!(eq?.photos || []).length) reasons.push({ id: "nophoto", label: "No photos" });
+  else {
+    const miss = eq.missingRequired || [];
+    if (miss.length) {
+      reasons.push({
+        id: "shots",
+        label: "Still needs: " + miss.map((s) => s.label || s.id || s).join(", "),
+      });
+    }
+    if (hasDarkPhoto(eq)) reasons.push({ id: "dark", label: "Dark photo — retake" });
+  }
+  if (eq?.lat == null || eq?.lng == null) reasons.push({ id: "gps", label: "No GPS" });
+  if (eq?.needsFollowup) reasons.push({ id: "followup", label: "Follow-up flagged" });
+  return reasons;
+}
+
+export function officePassItems(items) {
+  return (items || []).filter((eq) => officePassReasons(eq).length > 0).sort(compareEquipmentWalkOrder);
+}
+
+export function rushShotType(photos, pending) {
+  if (pending) return pending;
+  const n = (photos || []).length;
+  if (n === 0) return "overall";
+  if (n === 1) return "tag";
+  return null;
+}
+
+/**
+ * Decide whether this fix stays on the last pin, snaps to a nearby tag,
+ * or starts a new untitled pin. Movement uses GPS accuracy so indoor
+ * jumps do not invent extra pins; a long pause still splits.
+ */
+export function suggestAttachTarget(opts = {}) {
+  const {
+    items = [],
+    lat,
+    lng,
+    acc,
+    forceNew = false,
+    lastPin = null,
+    lastShotAt = null,
+    now = Date.now(),
+    lockCurrent = false,
+  } = opts;
+
+  if (forceNew) return { how: "pin", reason: "forced" };
+  if (lockCurrent && lastPin) {
+    const dist = lastPin.lat != null && lat != null ? haversineM(lat, lng, lastPin.lat, lastPin.lng) : null;
+    return { how: "current", eq: lastPin, dist, reason: "locked" };
+  }
+
+  const moved =
+    lastPin && lastPin.lat != null && lat != null ? haversineM(lat, lng, lastPin.lat, lastPin.lng) : null;
+  const waited = lastShotAt != null ? now - lastShotAt : 0;
+  const splitM = splitDistanceM(acc);
+
+  if (lastPin && moved != null && moved <= splitM) {
+    if (waited >= SPLIT_WAIT_MS) return { how: "pin", reason: "waited", moved };
+    return { how: "current", eq: lastPin, dist: moved, reason: "still-here" };
+  }
+
+  if (lastPin && moved != null && moved > splitM) {
+    const near = lat != null ? nearestByGps(items, lat, lng, attachRadiusM(acc)) : null;
+    if (near && near.eq.id !== lastPin.id) {
+      return { how: "near", eq: near.eq, dist: near.dist, reason: "nearest" };
+    }
+    return { how: "pin", reason: "moved", moved };
+  }
+
+  const near = lat != null ? nearestByGps(items, lat, lng, attachRadiusM(acc)) : null;
+  if (near) return { how: "near", eq: near.eq, dist: near.dist, reason: "nearest" };
+  return { how: "pin", reason: "none" };
+}
+
+export function attachPreviewText(suggestion) {
+  if (!suggestion) return "GPS will pick the nearest pin";
+  if (suggestion.how === "pin") {
+    if (suggestion.reason === "moved") {
+      return "New pin · you moved " + Math.round(suggestion.moved) + " m";
+    }
+    if (suggestion.reason === "waited") return "New pin · been a minute";
+    if (suggestion.reason === "forced") return "Next snap starts a new pin";
+    return "New pin at this spot";
+  }
+  const tag = suggestion.eq?.tag || "this tag";
+  const d = suggestion.dist != null ? " · " + Math.round(suggestion.dist) + " m" : "";
+  const n = (suggestion.eq?.photos || []).length;
+  const next = n === 1 ? " · next: nameplate" : "";
+  return "Adding to " + tag + d + next;
+}
+
 export function facilityKey(visit) {
   const client = String(visit?.client || "").trim();
   const facility = String(visit?.facility || "").trim();

@@ -20,6 +20,7 @@
     </div>
   </header>
 
+  <div id="fv-gps-banner" class="fv-gps-banner hidden">Location is off. Pins will not map. <button type="button" id="btn-gps-retry" class="btn-secondary btn-sm">Try GPS</button></div>
   <div id="search-bar" class="search-bar hidden">
     <input type="search" id="search-input" placeholder="Search visits, tags, areas…" autocomplete="off">
     <button id="btn-clear-search" class="btn-icon">×</button>
@@ -76,7 +77,7 @@
         </button>
         <button type="button" class="action-tile" id="tile-missing">
           <span class="action-title">Punch list</span>
-          <span class="action-sub">What’s missing</span>
+          <span class="action-sub">Names, dark shots, GPS</span>
         </button>
         <button type="button" class="action-tile" id="tile-map">
           <span class="action-title">Map</span>
@@ -109,6 +110,7 @@
       <div id="eq-type-filter" class="chip-group eq-filter"></div>
       <div id="equipment-list" class="card-list"></div>
       <div class="detail-actions">
+        <button id="btn-leave-site" class="btn-primary btn-lg">Leave site</button>
         <button id="btn-export-package" class="btn-primary">Export Package</button>
         <button id="btn-share-package" class="btn-secondary">Share</button>
         <button id="btn-generate-pdf" class="btn-secondary">Generate Report</button>
@@ -260,7 +262,7 @@
       </div>
       <div class="qc-actions">
         <label for="qc-photo-input" class="btn-primary btn-lg">Take / Add Photos</label>
-        <input type="file" id="qc-photo-input" accept="image/*" capture="environment" hidden multiple>
+        <input type="file" id="qc-photo-input" accept="image/*,image/heic,image/heif,.heic,.heif" capture="environment" hidden multiple>
       </div>
       <div id="qc-preview" class="qc-preview"></div>
       <div class="detail-actions">
@@ -384,11 +386,12 @@
     <section id="view-ready-check" class="view">
       <div class="detail-header">
         <h2 id="ready-check-title">Punch list</h2>
-        <p class="meta" id="ready-check-meta">Finish these before you leave the site so the office isn't chasing photos later.</p>
+        <p class="meta" id="ready-check-meta">Name untitled pins, retake dark shots, then leave with the package.</p>
       </div>
       <div id="ready-list" class="card-list"></div>
       <div class="detail-actions">
-        <button id="btn-ready-done" class="btn-primary">Back to Visit</button>
+        <button id="btn-leave-site-ready" class="btn-primary btn-lg">Leave site — export</button>
+        <button id="btn-ready-done" class="btn-secondary">Back to Visit</button>
       </div>
     </section>
   </main>

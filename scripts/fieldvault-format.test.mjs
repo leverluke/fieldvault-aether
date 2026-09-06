@@ -13,6 +13,14 @@ import {
   walkLine,
   nearestByGps,
   isUntitledTag,
+  suggestAttachTarget,
+  attachPreviewText,
+  officePassItems,
+  officePassReasons,
+  compareTags,
+  compareEquipmentWalkOrder,
+  rushShotType,
+  SPLIT_WAIT_MS,
 } from "../src/fieldvault/format.js";
 
 test("csvCell quotes commas and doubles inner quotes", () => {
@@ -76,6 +84,70 @@ test("import rows map GPS without the 0.002 sketch hack", () => {
   assert.equal(row.tag, "P-101");
   assert.equal(row.lat, 29.7);
   assert.equal(row.lng, -95.1);
+});
+
+test("suggestAttachTarget stays, splits on move, and waits", () => {
+  const last = { id: "p", tag: "P-101", lat: 29.7362, lng: -95.0128, gpsAcc: 8, photos: [{}] };
+  const stay = suggestAttachTarget({
+    items: [last],
+    lat: 29.73621,
+    lng: -95.01281,
+    acc: 8,
+    lastPin: last,
+    lastShotAt: Date.now() - 5000,
+  });
+  assert.equal(stay.how, "current");
+  assert.match(attachPreviewText(stay), /Adding to P-101/);
+
+  const moved = suggestAttachTarget({
+    items: [last],
+    lat: 29.7366,
+    lng: -95.0134,
+    acc: 8,
+    lastPin: last,
+    lastShotAt: Date.now() - 5000,
+  });
+  assert.equal(moved.how, "pin");
+  assert.equal(moved.reason, "moved");
+
+  const waited = suggestAttachTarget({
+    items: [last],
+    lat: 29.73621,
+    lng: -95.01281,
+    acc: 8,
+    lastPin: last,
+    lastShotAt: Date.now() - SPLIT_WAIT_MS - 1000,
+  });
+  assert.equal(waited.how, "pin");
+  assert.equal(waited.reason, "waited");
+
+  const locked = suggestAttachTarget({
+    items: [last],
+    lat: 29.74,
+    lng: -95.02,
+    acc: 8,
+    lastPin: last,
+    lockCurrent: true,
+  });
+  assert.equal(locked.how, "current");
+});
+
+test("office pass and walk-order helpers", () => {
+  assert.ok(compareTags("Pin 2", "Pin 10") < 0);
+  const a = { tag: "Pin 2", createdAt: 20, photos: [{ capturedAt: 20 }] };
+  const b = { tag: "P-101", createdAt: 10, photos: [{ capturedAt: 10 }] };
+  assert.equal(compareEquipmentWalkOrder(b, a) < 0, true);
+  assert.equal(rushShotType([]), "overall");
+  assert.equal(rushShotType([{}]), "tag");
+  const items = officePassItems([
+    { tag: "P-101", photos: [{ note: "" }], lat: 1, lng: 2 },
+    { tag: "Pin 1", photos: [{ note: "Possibly dark" }], lat: null, lng: null },
+  ]);
+  assert.equal(items[0].tag, "Pin 1");
+  const reasons = officePassReasons(items[0]).map((r) => r.id);
+  assert.ok(reasons.includes("untitled"));
+  assert.ok(reasons.includes("dark"));
+  assert.ok(reasons.includes("gps"));
 });
 
 test("nearestByGps picks the close tag and ignores far ones", () => {

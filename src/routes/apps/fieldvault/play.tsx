@@ -16,7 +16,7 @@ function FieldVaultPlay() {
     document.body.classList.add("fv-active");
     let cancelled = false;
     void (async () => {
-      const [{ ensureFieldVaultLibs }, { requestWalkWake, releaseWalkWake }, { initFieldVault, seedFieldVaultDemo }] =
+      const [{ ensureFieldVaultLibs }, { requestWalkWake, releaseWalkWake, bindWalkWake }, { initFieldVault, seedFieldVaultDemo }] =
         await Promise.all([
           import("@/fieldvault/libs"),
           import("@/fieldvault/wake"),
@@ -24,6 +24,7 @@ function FieldVaultPlay() {
         ]);
       if (cancelled) return;
       await ensureFieldVaultLibs();
+      bindWalkWake();
       await requestWalkWake();
       await seedFieldVaultDemo();
       if (cancelled) return;
