@@ -40,6 +40,7 @@ let lastCapturedEqId = null;
 let sessionShotCount = 0;
 let showEmptyAreas = false;
 let camBusy = false;
+let cameraFallback = false;
 
 const COPY = {
   commercial: {
@@ -400,24 +401,31 @@ function updateCamChrome() {
   if ($('fv-cam-hint')) {
     $('fv-cam-hint').textContent = forceNewPin
       ? 'Next snap starts a new pin.'
-      : 'Stand at the asset. Snap. Keep walking.';
+      : cameraFallback
+        ? 'No live camera here — shutter still pins GPS.'
+        : 'Stand at the asset. Snap. Keep walking.';
   }
 }
 
 async function openFieldCameraUi() {
   const overlay = $('fv-camera');
   const video = $('fv-cam-video');
-  if (!overlay || !video || !navigator.mediaDevices?.getUserMedia) return false;
+  if (!overlay || !video) return false;
+  cameraFallback = false;
   try {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('no camera api');
     await startFieldCamera(video);
   } catch (e) {
     console.warn(e);
-    return false;
+    cameraFallback = true;
+    stopFieldCamera();
+    video.srcObject = null;
   }
   cameraOpen = true;
   sessionShotCount = 0;
   overlay.classList.remove('hidden');
   overlay.setAttribute('aria-hidden', 'false');
+  overlay.classList.toggle('fv-cam-fallback', cameraFallback);
   document.body.classList.add('fv-cam-open');
   $('sticky-next')?.classList.add('hidden');
   updateCamChrome();
@@ -429,7 +437,9 @@ export function closeFieldCameraUi() {
   cameraOpen = false;
   forceNewPin = false;
   camBusy = false;
+  cameraFallback = false;
   stopFieldCamera();
+  $('fv-camera')?.classList.remove('fv-cam-fallback');
   const overlay = $('fv-camera');
   overlay?.classList.add('hidden');
   overlay?.setAttribute('aria-hidden', 'true');
@@ -455,7 +465,24 @@ async function shutterFieldCamera() {
   try {
     buzz();
     showToast('Saving…');
-    const file = await grabFrame(video);
+    let file;
+    if (cameraFallback || !video.videoWidth) {
+      const blob = await canvasJpegBlob((ctx, c) => {
+        ctx.fillStyle = '#1e252c';
+        ctx.fillRect(0, 0, c.width, c.height);
+        ctx.fillStyle = '#8fb8c9';
+        ctx.font = '600 36px "IBM Plex Sans", system-ui, sans-serif';
+        ctx.fillText('Field pin', 36, 80);
+        ctx.fillStyle = '#c5d0d8';
+        ctx.font = '22px "IBM Plex Sans", system-ui, sans-serif';
+        const gps = lastFix ? lastFix.lat.toFixed(5) + ', ' + lastFix.lng.toFixed(5) : 'GPS pending';
+        ctx.fillText(gps, 36, 120);
+        ctx.fillText(new Date().toLocaleTimeString(), 36, 152);
+      });
+      file = new File([blob], `fv-${Date.now()}.jpg`, { type: 'image/jpeg' });
+    } else {
+      file = await grabFrame(video);
+    }
     const shot = await ingestPhotoFile(file);
     const result = await smartAttachPhoto(shot);
     sessionShotCount += 1;
