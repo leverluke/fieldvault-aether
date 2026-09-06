@@ -2888,7 +2888,7 @@ async function openGlobalPhotos() {
   renderGlobalPhotos(visits, equipment, filter ? filter.value : 'all');
 }
 
-function renderGlobalPhotos(visits, equipment, visitFilter) {
+async function renderGlobalPhotos(visits, equipment, visitFilter) {
   const grid = $('global-photos-grid');
   if (!grid) return;
   const visitMap = Object.fromEntries(visits.map(v => [v.id, v]));
