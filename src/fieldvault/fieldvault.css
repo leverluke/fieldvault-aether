@@ -1132,9 +1132,9 @@ body.defense-mode .app-header { background: #10161c; }
   color: #fff;
 }
 .fv-cam-textbtn {
-  min-height: 48px;
-  min-width: 72px;
-  padding: 8px 12px;
+  min-height: 56px;
+  min-width: 88px;
+  padding: 10px 16px;
   border: 1px solid #5a6670;
   border-radius: 10px;
   background: rgba(0,0,0,0.35);

@@ -41,6 +41,7 @@ let sessionShotCount = 0;
 let showEmptyAreas = false;
 let camBusy = false;
 let cameraFallback = false;
+let sessionPinSeq = 0;
 
 const COPY = {
   commercial: {
@@ -503,10 +504,13 @@ async function shutterFieldCamera() {
 }
 
 function nextPinName(items) {
-  const used = new Set((items || []).map((e) => String(e.tag || '').trim().toLowerCase()));
-  let n = 1;
-  while (used.has('pin ' + n)) n += 1;
-  return 'Pin ' + n;
+  let max = sessionPinSeq;
+  for (const e of items || []) {
+    const m = /^(?:pin|untitled)\s*(\d+)$/i.exec(String(e.tag || '').trim());
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  sessionPinSeq = max + 1;
+  return 'Pin ' + sessionPinSeq;
 }
 
 async function createUntitledPin(fix) {
