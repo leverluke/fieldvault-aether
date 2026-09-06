@@ -389,6 +389,10 @@ async function startRushCapture(shotId) {
   setPendingShot(shotId || null);
   const id = await ensureVisitForCapture();
   if (!id) return;
+  if (currentView !== 'view-equipment-detail') {
+    currentEquipmentId = null;
+    persistSession();
+  }
   startGpsWatch();
   persistSession();
   await reconcileEquipmentForVisit();

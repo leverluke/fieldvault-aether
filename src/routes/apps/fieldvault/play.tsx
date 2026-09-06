@@ -25,9 +25,9 @@ function FieldVaultPlay() {
       if (cancelled) return;
       await ensureFieldVaultLibs();
       await requestWalkWake();
-      await initFieldVault();
-      if (cancelled) return;
       await seedFieldVaultDemo();
+      if (cancelled) return;
+      await initFieldVault();
       return () => {
         void releaseWalkWake();
       };
