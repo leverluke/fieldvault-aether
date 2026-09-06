@@ -1,0 +1,13 @@
+{
+  "name": "FieldVault",
+  "short_name": "FieldVault",
+  "description": "Snap the unit. Pin GPS. Leave with a package.",
+  "start_url": "/apps/fieldvault/play",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0c0f12",
+  "theme_color": "#0c0f12",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

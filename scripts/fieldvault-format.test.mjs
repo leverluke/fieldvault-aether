@@ -21,6 +21,13 @@ import {
   compareEquipmentWalkOrder,
   rushShotType,
   SPLIT_WAIT_MS,
+  parseSpokenTag,
+  parseSpokenName,
+  nextWalkGap,
+  walkGapText,
+  hammingHex,
+  dHashFromGray,
+  isBlurryVar,
 } from "../src/fieldvault/format.js";
 
 test("csvCell quotes commas and doubles inner quotes", () => {
@@ -148,6 +155,8 @@ test("office pass and walk-order helpers", () => {
   assert.ok(reasons.includes("untitled"));
   assert.ok(reasons.includes("dark"));
   assert.ok(reasons.includes("gps"));
+  const blurry = officePassReasons({ tag: "P-101", photos: [{ note: "Blurry" }], lat: 1, lng: 2 });
+  assert.ok(blurry.some((r) => r.id === "blur"));
 });
 
 test("nearestByGps picks the close tag and ignores far ones", () => {
@@ -179,4 +188,35 @@ test("facilities and punch list helpers", () => {
     punch.map((e) => e.tag),
     ["XV-402", "V-301"],
   );
+});
+
+test("spoken nameplate becomes a tag", () => {
+  assert.equal(parseSpokenTag("this is XV dash 402"), "XV-402");
+  assert.equal(parseSpokenName("nameplate is PCV 12"), "PCV-12");
+  assert.equal(parseSpokenName("call it Charge pump"), "Charge pump");
+});
+
+test("next walk gap is nearest pin that still needs work", () => {
+  const gap = nextWalkGap(
+    [
+      { tag: "A", lat: 0, lng: 0, photos: [{}] },
+      { tag: "B", lat: 0, lng: 0.001, photos: [] },
+      { tag: "C", lat: 0, lng: 0.01, photos: [] },
+    ],
+    0,
+    0,
+  );
+  assert.equal(gap?.eq.tag, "B");
+  assert.match(walkGapText(gap), /B/);
+});
+
+test("dHash and blur helpers", () => {
+  const a = Array.from({ length: 72 }, () => 40);
+  const b = Array.from({ length: 72 }, () => 41);
+  const ha = dHashFromGray(a, 8);
+  const hb = dHashFromGray(b, 8);
+  assert.equal(ha.length, 16);
+  assert.ok(hammingHex(ha, hb) <= 8);
+  assert.equal(isBlurryVar(10), true);
+  assert.equal(isBlurryVar(200), false);
 });

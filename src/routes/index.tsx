@@ -15,9 +15,9 @@ function Home() {
         n="01"
         kicker="Site capture"
         title="FieldVault"
-        dek="Photograph the unit in a guided sequence, pin it to GPS, score the walk, and leave with a package the office can use."
-        primary={{ href: "/apps/fieldvault/play", label: "Open FieldVault" }}
-        secondary={{ href: "/apps/fieldvault#module", label: "FixPlot & export" }}
+        dek="Snap the unit. Pin it on the map. Leave with one package the office can send."
+        primary={{ href: "/apps/fieldvault/play", label: "Snap a walk" }}
+        secondary={{ href: "/apps/fieldvault/play", label: "Open the map" }}
       >
         <CaptureDemo />
       </ProductBand>

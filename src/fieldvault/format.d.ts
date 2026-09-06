@@ -73,3 +73,15 @@ export function mapImportRow(row: unknown): {
   lng: number | null;
   source: string;
 };
+export function parseSpokenTag(raw: string): string;
+export function parseSpokenName(raw: string): string;
+export function nextWalkGap<T>(
+  items: T[],
+  lat?: number | null,
+  lng?: number | null,
+): { eq: T; dist: number | null; reason: { id: string; label: string } | null } | null;
+export function walkGapText(gap: { eq?: { tag?: string }; dist?: number | null; reason?: { label?: string } | null } | null): string;
+export function hammingHex(a: string, b: string): number;
+export function dHashFromGray(gray: number[], size?: number): string;
+export function isBlurryVar(laplacianVar: number, threshold?: number): boolean;
+export function hasNoteFlag(eq: { photos?: Array<{ note?: string }> }, re: RegExp): boolean;

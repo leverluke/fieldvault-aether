@@ -215,10 +215,17 @@ export function officePassReasons(eq) {
       });
     }
     if (hasDarkPhoto(eq)) reasons.push({ id: "dark", label: "Dark photo — retake" });
+    if (hasNoteFlag(eq, /blur/i)) reasons.push({ id: "blur", label: "Blurry — retake" });
+    if (hasNoteFlag(eq, /duplicate/i)) reasons.push({ id: "dup", label: "Looks like a duplicate" });
+    if (hasNoteFlag(eq, /leak/i)) reasons.push({ id: "leak", label: "Possible leak / rust" });
   }
   if (eq?.lat == null || eq?.lng == null) reasons.push({ id: "gps", label: "No GPS" });
   if (eq?.needsFollowup) reasons.push({ id: "followup", label: "Follow-up flagged" });
   return reasons;
+}
+
+export function hasNoteFlag(eq, re) {
+  return (eq?.photos || []).some((p) => re.test(String(p.note || "")));
 }
 
 export function officePassItems(items) {
@@ -336,6 +343,89 @@ export function parseNameplateText(raw) {
     model: model ? model[1] : undefined,
     hint: words.slice(0, 6).join(" "),
   };
+}
+
+export function parseSpokenTag(raw) {
+  const text = String(raw || "")
+    .toUpperCase()
+    .replace(/['’]/g, "")
+    .replace(/\b(DASH|HYPHEN|MINUS)\b/g, "-");
+  const tagged = text.match(/\b([A-Z]{1,3})\s*-?\s*(\d{2,5}[A-Z]?)\b/);
+  if (tagged && !/^(PIN|THE|AND|FOR|ARE|WAS)$/.test(tagged[1])) {
+    return tagged[1] + "-" + tagged[2];
+  }
+  return "";
+}
+
+export function parseSpokenName(raw) {
+  const tag = parseSpokenTag(raw);
+  if (tag) return tag;
+  const m = String(raw || "").match(/(?:that(?:'s| is)|name(?:d| it)?|call it|tag)\s+(.+)/i);
+  if (!m) return "";
+  return m[1].replace(/[.]/g, "").trim().slice(0, 40);
+}
+
+export function nextWalkGap(items, lat, lng) {
+  const gaps = officePassItems(items);
+  if (!gaps.length) return null;
+  const withGps = gaps.filter((e) => e.lat != null && e.lng != null);
+  const pool = withGps.length ? withGps : gaps;
+  if (lat == null || lng == null || !withGps.length) {
+    const eq = pool[0];
+    return { eq, dist: null, reason: officePassReasons(eq)[0] || null };
+  }
+  let best = pool[0];
+  let bestD = Infinity;
+  for (const eq of pool) {
+    if (eq.lat == null) continue;
+    const d = haversineM(lat, lng, eq.lat, eq.lng);
+    if (d < bestD) {
+      best = eq;
+      bestD = d;
+    }
+  }
+  return { eq: best, dist: bestD, reason: officePassReasons(best)[0] || null };
+}
+
+export function walkGapText(gap) {
+  if (!gap || !gap.eq) return "Walk is clear";
+  const tag = gap.eq.tag || "pin";
+  const why = gap.reason?.label || "needs attention";
+  if (gap.dist != null && Number.isFinite(gap.dist)) {
+    return Math.round(gap.dist) + " m to " + tag + " · " + why;
+  }
+  return tag + " · " + why;
+}
+
+export function hammingHex(a, b) {
+  const left = String(a || "");
+  const right = String(b || "");
+  const n = Math.max(left.length, right.length);
+  let d = 0;
+  for (let i = 0; i < n; i++) {
+    const x = parseInt(left[i] || "0", 16) ^ parseInt(right[i] || "0", 16);
+    d += (x & 1) + ((x >> 1) & 1) + ((x >> 2) & 1) + ((x >> 3) & 1);
+  }
+  return d;
+}
+
+export function dHashFromGray(gray, size = 8) {
+  let bits = "";
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = y * (size + 1) + x;
+      bits += gray[i] > gray[i + 1] ? "1" : "0";
+    }
+  }
+  let hex = "";
+  for (let i = 0; i < bits.length; i += 4) {
+    hex += parseInt(bits.slice(i, i + 4), 2).toString(16);
+  }
+  return hex;
+}
+
+export function isBlurryVar(laplacianVar, threshold = 90) {
+  return laplacianVar < threshold;
 }
 
 export function mapImportRow(row) {

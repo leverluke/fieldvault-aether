@@ -28,6 +28,27 @@ export function cameraLive() {
   return !!(stream && stream.getVideoTracks().some((t) => t.readyState === "live"));
 }
 
+export function cameraTrack() {
+  return stream?.getVideoTracks()[0] ?? null;
+}
+
+export function torchSupported() {
+  const track = cameraTrack();
+  const caps = track?.getCapabilities?.() as { torch?: boolean } | undefined;
+  return !!caps?.torch;
+}
+
+export async function setTorch(on: boolean) {
+  const track = cameraTrack();
+  if (!track) return false;
+  try {
+    await track.applyConstraints({ advanced: [{ torch: on }] } as unknown as MediaTrackConstraints);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function grabFrame(video: HTMLVideoElement): Promise<File> {
   const w = video.videoWidth || 1280;
   const h = video.videoHeight || 960;

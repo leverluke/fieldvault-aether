@@ -1211,3 +1211,94 @@ body.fv-cam-open .search-bar,
 body.fv-cam-open .crumb-bar {
   visibility: hidden;
 }
+
+.walk-hud {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+  padding: 12px;
+  margin-bottom: 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.walk-hud.hidden { display: none !important; }
+.walk-hud-copy { flex: 1; min-width: 0; }
+.walk-hud-kicker {
+  margin: 0 0 4px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+#walk-hud-text, #map-walk-hud-text {
+  margin: 0;
+  font-weight: 700;
+  font-size: 1.02rem;
+}
+.walk-hud-compass {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+.walk-mini-map {
+  width: 132px;
+  height: 84px;
+  flex: 0 0 132px;
+  background: #12171b;
+  border-radius: 8px;
+  overflow: visible;
+}
+.map-walk-hud { margin-bottom: 10px; }
+.fv-cam-chip-btn {
+  border: 0;
+  color: inherit;
+  font: inherit;
+}
+.fv-cam-chip-btn[aria-pressed="true"] { background: #c9a227; color: #111; }
+.fv-cam-listen {
+  position: relative;
+  z-index: 2;
+  margin: 6px 14px 0;
+  text-align: center;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #9fd4c4;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.7);
+}
+.fv-cam-listen.off { color: #9aa7b0; }
+.fv-cam-issues {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin: 8px 14px;
+}
+.fv-cam-issue {
+  min-height: 36px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid #5a6670;
+  background: rgba(0,0,0,0.45);
+  color: #eef2f5;
+  font-weight: 700;
+  font-size: 0.78rem;
+}
+.fv-cam-issue.on { background: #8b3a2a; border-color: #c96a52; }
+.handoff-qr {
+  display: block;
+  width: min(240px, 70vw);
+  height: auto;
+  margin: 8px auto;
+  background: #fff;
+  padding: 8px;
+  border-radius: 8px;
+}
+.handoff-line {
+  font-family: ui-monospace, monospace;
+  font-size: 0.8rem;
+  word-break: break-word;
+  color: var(--text-muted);
+}

@@ -8,18 +8,25 @@ import {
   csvCell,
   isUntitledTag,
   hasDarkPhoto,
+  nextWalkGap,
   officePassItems,
   officePassReasons,
+  parseSpokenName,
   rushShotType,
   suggestAttachTarget,
   uniqueFacilities,
+  walkGapText,
   walkGeoJson,
   walkLine
 } from './format.js';
 import { blobToDataUrl, canvasJpegBlob, dataUrlToBlob, ingestPhotoFile } from './photos.ts';
 import { readNameplate } from './ocr-plate.ts';
 import { ensureFieldVaultLibs } from './libs.ts';
-import { grabFrame, startFieldCamera, stopFieldCamera } from './camera.ts';
+import { grabFrame, setTorch, startFieldCamera, stopFieldCamera, torchSupported } from './camera.ts';
+import { judgeBlob, isDuplicateHash } from './eyes.ts';
+import { prefetchWalkTiles } from './tiles.ts';
+import { canInstallPwa, promptInstallPwa } from './pwa.ts';
+import { handoffHtml, handoffLine, handoffQrUrl } from './handoff.ts';
 
 let db = null;
 let currentView = 'visits';
@@ -58,6 +65,12 @@ let cameraFallback = false;
 let sessionPinSeq = 0;
 let lastAttach = null;
 let gpsDenied = false;
+let returnWalkMode = false;
+let camListenOn = false;
+let torchOn = false;
+let headingDeg = null;
+let lastPhotoHash = null;
+let lastSpokenAt = 0;
 
 const COPY = {
   commercial: {
@@ -73,7 +86,7 @@ const COPY = {
     readyHeader: "What's missing?",
     readyMeta: "Name untitled pins, retake dark shots, then leave with the package.",
     readyAllGood: "You're good to leave",
-    readyAllGoodBody: 'Required photos are in place. Generate the report when you are back.',
+    readyAllGoodBody: 'Required photos are in place. Leave site sends one client package.',
     readyBack: 'Back to Visit',
     photoPromptsTitle: 'Photos to take',
     photoPromptHelp: 'Tap Take on a row. Start with a wide shot and the nameplate — those two matter most.',
@@ -447,9 +460,14 @@ function updateCamChrome() {
   const n = lastAttach?.photoCount;
   if ($('fv-cam-hint')) {
     if (forceNewPin) $('fv-cam-hint').textContent = 'Next snap starts a new pin.';
-    else if (n === 1) $('fv-cam-hint').textContent = 'Nameplate — fill the frame.';
+    else if (n === 1) $('fv-cam-hint').textContent = 'Nameplate — fill the frame. Say the tag if you can.';
     else if (cameraFallback) $('fv-cam-hint').textContent = 'No live camera here — shutter still pins GPS.';
-    else $('fv-cam-hint').textContent = 'Stand at the asset. Snap. Keep walking.';
+    else $('fv-cam-hint').textContent = 'Stand at the asset. Snap. Volume or space also shoots.';
+  }
+  const listen = $('fv-cam-listen');
+  if (listen) {
+    listen.classList.toggle('off', !camListenOn);
+    listen.textContent = camListenOn ? 'Listening for a tag…' : 'Say the tag — mic off on this device';
   }
   void refreshCamAttachPreview();
 }
@@ -497,11 +515,18 @@ async function openFieldCameraUi() {
   }
   cameraOpen = true;
   sessionShotCount = 0;
+  torchOn = false;
   overlay.classList.remove('hidden');
   overlay.setAttribute('aria-hidden', 'false');
   overlay.classList.toggle('fv-cam-fallback', cameraFallback);
   document.body.classList.add('fv-cam-open');
   $('sticky-next')?.classList.add('hidden');
+  const torchBtn = $('fv-cam-torch');
+  if (torchBtn) {
+    torchBtn.classList.toggle('hidden', cameraFallback || !torchSupported());
+    torchBtn.setAttribute('aria-pressed', 'false');
+  }
+  startCamListen();
   updateCamChrome();
   updateCamAttach(currentEquipmentId ? 'Will add to the open tag' : 'GPS will pick the nearest pin');
   return true;
@@ -512,6 +537,9 @@ export function closeFieldCameraUi() {
   forceNewPin = false;
   camBusy = false;
   cameraFallback = false;
+  torchOn = false;
+  stopCamListen();
+  void setTorch(false);
   stopFieldCamera();
   $('fv-camera')?.classList.remove('fv-cam-fallback');
   const overlay = $('fv-camera');
@@ -525,6 +553,190 @@ export function closeFieldCameraUi() {
 
 function updateCamAttach(text) {
   if ($('fv-cam-attach')) $('fv-cam-attach').textContent = text || '';
+}
+
+function startCamListen() {
+  camListenOn = false;
+  if (!recognition) initSpeech();
+  if (!recognition) {
+    updateCamChrome();
+    return;
+  }
+  currentVoiceTarget = null;
+  voiceTargetId = null;
+  camListenOn = true;
+  try { recognition.start(); } catch (e) {}
+  updateCamChrome();
+}
+
+function stopCamListen() {
+  camListenOn = false;
+  try { recognition?.stop(); } catch (e) {}
+}
+
+async function applySpokenPinName(name) {
+  const id = lastCapturedEqId || currentEquipmentId || lastAttach?.id;
+  if (!id || !name) return;
+  const eq = await dbGet(STORE_EQUIPMENT, id);
+  if (!eq) return;
+  eq.tag = name;
+  eq.updatedAt = Date.now();
+  await dbPut(STORE_EQUIPMENT, eq);
+  if (lastAttach) lastAttach.tag = name;
+  updateCamAttach('Named ' + name);
+  showToast('Named ' + name);
+}
+
+async function flagCameraIssue(kind) {
+  const id = lastCapturedEqId || currentEquipmentId || lastAttach?.id;
+  if (!id) { showToast('Snap first, then flag'); return; }
+  const eq = await dbGet(STORE_EQUIPMENT, id);
+  if (!eq) return;
+  const labels = { leak: 'Leak', notag: 'No tag', blocked: 'Blocked access' };
+  const label = labels[kind] || kind;
+  const extra = label + ' flagged in the field.';
+  eq.notes = (eq.notes ? eq.notes + ' ' : '') + extra;
+  if (kind === 'leak' || kind === 'blocked') eq.needsFollowup = true;
+  const last = (eq.photos || [])[eq.photos.length - 1];
+  if (last) last.note = (last.note ? last.note + '. ' : '') + extra;
+  eq.updatedAt = Date.now();
+  await dbPut(STORE_EQUIPMENT, eq);
+  document.querySelectorAll('.fv-cam-issue').forEach((b) => {
+    if (b.dataset.issue === kind) b.classList.add('on');
+  });
+  showToast(label + ' noted');
+}
+
+async function toggleTorch() {
+  if (!cameraOpen || cameraFallback) return;
+  torchOn = !torchOn;
+  const ok = await setTorch(torchOn);
+  if (!ok) {
+    torchOn = false;
+    showToast('Light not available on this camera');
+  }
+  $('fv-cam-torch')?.setAttribute('aria-pressed', torchOn ? 'true' : 'false');
+}
+
+function bindFieldShutterKeys() {
+  if (document.documentElement.dataset.fvShutter === '1') return;
+  document.documentElement.dataset.fvShutter = '1';
+  document.addEventListener('keydown', (e) => {
+    if (!cameraOpen) return;
+    const t = e.target;
+    if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
+    if (e.code === 'Space' || e.key === ' ' || e.key === 'AudioVolumeUp' || e.key === 'AudioVolumeDown' || e.key === 'VolumeUp' || e.key === 'VolumeDown') {
+      e.preventDefault();
+      void shutterFieldCamera();
+    }
+  }, { passive: false });
+}
+
+function headingLabel() {
+  if (headingDeg == null || !Number.isFinite(headingDeg)) return '';
+  const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+  return dirs[Math.round(headingDeg / 45) % 8] + ' ' + Math.round(headingDeg) + '°';
+}
+
+function bindCompass() {
+  if (typeof window === 'undefined' || window.__fvCompass) return;
+  window.__fvCompass = true;
+  const apply = (e) => {
+    const h = e.webkitCompassHeading != null ? e.webkitCompassHeading : (e.alpha != null ? (360 - e.alpha) : null);
+    if (h == null || !Number.isFinite(h)) return;
+    headingDeg = h;
+    const el = $('walk-hud-compass');
+    if (el) {
+      el.classList.remove('hidden');
+      el.textContent = 'Facing ' + headingLabel();
+    }
+    const rush = $('rush-compass');
+    if (rush) rush.textContent = headingLabel();
+  };
+  window.addEventListener('deviceorientationabsolute', apply, true);
+  window.addEventListener('deviceorientation', apply, true);
+}
+
+function plotMiniWalk(svg, items, fix, gap) {
+  if (!svg) return;
+  const pts = (items || []).filter((e) => e.lat != null && e.lng != null);
+  if (!pts.length && !fix) {
+    svg.innerHTML = '';
+    return;
+  }
+  const all = pts.concat(fix && fix.lat != null ? [{ lat: fix.lat, lng: fix.lng, _you: true }] : []);
+  const lats = all.map((p) => p.lat);
+  const lngs = all.map((p) => p.lng);
+  const minLat = Math.min(...lats);
+  const maxLat = Math.max(...lats);
+  const minLng = Math.min(...lngs);
+  const maxLng = Math.max(...lngs);
+  const pad = 10;
+  const w = 160;
+  const h = 100;
+  const dx = Math.max(0.00008, maxLng - minLng);
+  const dy = Math.max(0.00008, maxLat - minLat);
+  const xy = (p) => {
+    const x = pad + ((p.lng - minLng) / dx) * (w - pad * 2);
+    const y = pad + ((maxLat - p.lat) / dy) * (h - pad * 2);
+    return { x, y };
+  };
+  const path = walkLine(items);
+  let d = '';
+  path.forEach((p, i) => {
+    const c = xy(p);
+    d += (i ? 'L' : 'M') + c.x.toFixed(1) + ' ' + c.y.toFixed(1);
+  });
+  let dots = '';
+  for (const eq of pts) {
+    const c = xy(eq);
+    const gapId = gap?.eq && gap.eq.id;
+    const empty = !(eq.photos || []).length;
+    const fill = eq.id === gapId ? '#e07a5f' : empty ? '#d4a017' : '#8fb8c9';
+    dots += `<circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="${eq.id === gapId ? 5 : 3.2}" fill="${fill}"/>`;
+  }
+  if (fix && fix.lat != null) {
+    const c = xy(fix);
+    dots += `<circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="4.5" fill="#5ee0b5" stroke="#0c0f12" stroke-width="1.5"/>`;
+  }
+  svg.innerHTML = `<rect x="0" y="0" width="${w}" height="${h}" rx="8" fill="#12171b"/>` +
+    (d ? `<path d="${d}" fill="none" stroke="#8fb8c9" stroke-width="1.6"/>` : '') + dots;
+}
+
+async function annotatedVisitItems() {
+  if (!currentVisitId) return [];
+  const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
+  return items.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) }));
+}
+
+async function refreshWalkHud() {
+  const hud = $('walk-hud');
+  if (!hud) return;
+  if (!currentVisitId || currentView === 'view-visits') {
+    hud.classList.add('hidden');
+    return;
+  }
+  const items = await annotatedVisitItems();
+  if (!items.length) {
+    hud.classList.add('hidden');
+    return;
+  }
+  const gap = nextWalkGap(items, lastFix?.lat, lastFix?.lng);
+  hud.classList.remove('hidden');
+  if ($('walk-hud-text')) $('walk-hud-text').textContent = walkGapText(gap);
+  if ($('walk-hud-compass')) {
+    if (headingDeg != null) {
+      $('walk-hud-compass').classList.remove('hidden');
+      $('walk-hud-compass').textContent = 'Facing ' + headingLabel();
+    }
+  }
+  plotMiniWalk($('walk-mini-map'), items, lastFix, gap);
+  const mapHud = $('map-walk-hud');
+  if (mapHud && $('map-walk-hud-text')) {
+    mapHud.classList.toggle('hidden', !gap);
+    $('map-walk-hud-text').textContent = walkGapText(gap);
+  }
+  if (lastFix) void prefetchWalkTiles(lastFix.lat, lastFix.lng);
 }
 
 function buzz() {
@@ -634,11 +846,20 @@ async function addPhotoToEquipment(eq, shot) {
     const smaller = await ingestPhotoFile(new File([shot.blob], 'photo.jpg', { type: 'image/jpeg' }), { quality: 0.52, maxDim: 1024 });
     blobId = await putPhotoBlob(smaller.blob, smaller.mime);
   }
+  let judge = null;
+  try { judge = await judgeBlob(shot.blob); } catch (e) { judge = null; }
+  const bits = [];
+  if (shot.dark || judge?.dark) bits.push('Possibly dark');
+  if (judge?.blur) bits.push('Blurry');
+  if (judge?.leakHint) bits.push('Possible leak / rust');
+  if (judge?.hash && isDuplicateHash(judge.hash, lastPhotoHash)) bits.push('Looks like a duplicate');
+  if (judge?.hash) lastPhotoHash = judge.hash;
   const rec = {
     id: uuid(),
     blobId,
-    note: shot.dark ? 'Possibly dark' : '',
+    note: bits.join('. '),
     promptType: autoType,
+    hash: judge?.hash || '',
     lat: shot.exif?.lat ?? lastFix?.lat ?? null,
     lng: shot.exif?.lng ?? lastFix?.lng ?? null,
     gpsAcc: shot.exif?.acc ?? lastFix?.acc,
@@ -1502,6 +1723,14 @@ function initSpeech() {
         if (e.results[i].isFinal) finalText += t;
         else interim += t;
       }
+      if (camListenOn && cameraOpen && !currentVoiceTarget) {
+        const spoken = parseSpokenName(finalText || interim);
+        if (spoken && Date.now() - lastSpokenAt > 1200) {
+          lastSpokenAt = Date.now();
+          void applySpokenPinName(spoken);
+        }
+        return;
+      }
       const el = currentVoiceTarget ? $(currentVoiceTarget) : (voiceTargetId ? $(voiceTargetId) : null);
       if (!el) return;
       if (!el.dataset.voiceBase) el.dataset.voiceBase = el.value || '';
@@ -1515,6 +1744,10 @@ function initSpeech() {
       console.warn('Speech error', e.error);
     };
     recognition.onend = () => {
+      if (camListenOn && cameraOpen) {
+        try { recognition.start(); } catch (err) {}
+        return;
+      }
       if (mediaRecorder && mediaRecorder.state === 'recording') {
         try { recognition.start(); } catch (err) {}
       }
@@ -1735,14 +1968,19 @@ function renderRushHero(visits, equipment) {
   }
   const items = (equipment || []).filter((e) => e.visitId === latest.id);
   const unnamed = items.filter((e) => isUntitledTag(e.tag)).length;
+  const gap = nextWalkGap(items.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) })), lastFix?.lat, lastFix?.lng);
+  const gapLine = gap ? walkGapText(gap) : '';
   hero.classList.remove('hidden');
   hero.innerHTML = `
     <p class="rush-kicker">Continue this walk</p>
     <h2 class="rush-title">${escapeHtml(latest.title || 'Visit')}</h2>
     <p class="rush-sub">${escapeHtml([latest.client, latest.facility].filter(Boolean).join(' · ') || 'On site')}${items.length ? ' · ' + items.length + ' tags' : ''}${unnamed ? ' · ' + unnamed + ' still untitled' : ''}</p>
+    ${gapLine ? `<p class="rush-sub" id="rush-gap">${escapeHtml(gapLine)}</p>` : ''}
+    <p class="rush-sub" id="rush-compass">${headingLabel() ? escapeHtml('Facing ' + headingLabel()) : ''}</p>
     <div class="rush-actions">
       <button type="button" class="btn-primary btn-lg" id="rush-snap">Snap</button>
       <button type="button" class="btn-secondary" id="rush-open">Open visit</button>
+      <button type="button" class="btn-secondary" id="rush-map">Map the walk</button>
     </div>`;
   $('rush-snap')?.addEventListener('click', () => {
     currentVisitId = latest.id;
@@ -1754,6 +1992,11 @@ function renderRushHero(visits, equipment) {
     currentAreaId = null;
     showView('view-visit-detail');
     loadVisitDetail(latest.id);
+  });
+  $('rush-map')?.addEventListener('click', () => {
+    currentVisitId = latest.id;
+    persistSession();
+    openMapView();
   });
 }
 
@@ -1901,9 +2144,15 @@ async function walkAgainFrom(visitId) {
   }
   currentVisitId = visit.id;
   latestVisitId = visit.id;
-  showToast('Return walk ready — same tags, empty photos');
-  showView('view-visit-detail');
-  loadVisitDetail(visit.id);
+  persistSession();
+  returnWalkMode = true;
+  const cloned = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', visit.id);
+  const gap = nextWalkGap(cloned, lastFix?.lat, lastFix?.lng);
+  showToast(walkGapText(gap) || 'Return walk ready — same tags, empty photos');
+  showView('view-map');
+  $('header-title').textContent = 'Walk again';
+  await initMap();
+  refreshNearest();
 }
 
 async function loadVisitDetail(id) {
@@ -1924,6 +2173,7 @@ async function loadVisitDetail(id) {
   equipment.sort(compareEquipmentWalkOrder);
 
   renderCompleteness(equipment);
+  void refreshWalkHud();
 
   const areasList = $('areas-list');
   const filledAreas = areas.filter((a) => equipment.some((e) => e.areaId === a.id));
@@ -2057,16 +2307,16 @@ async function openReadyCheck() {
   const hard = officePassItems(annotated);
   if (hard.length === 0) {
     list.innerHTML = `<div class="empty-state"><h2>${escapeHtml(c.readyAllGood)}</h2><p>${escapeHtml(c.readyAllGoodBody)}</p>
-      <button type="button" class="btn-primary btn-lg" id="btn-leave-clean">Leave site — share package</button></div>`;
+      <button type="button" class="btn-primary btn-lg" id="btn-leave-clean">Leave site — send to client</button></div>`;
     $('btn-leave-clean')?.addEventListener('click', () => void leaveSite({ force: true }));
     return;
   }
   const cards = hard.map(eq => {
     const reasons = officePassReasons(eq);
     const untitled = reasons.some((r) => r.id === 'untitled');
-    const dark = reasons.some((r) => r.id === 'dark');
+    const dark = reasons.some((r) => r.id === 'dark' || r.id === 'blur' || r.id === 'dup');
     const miss = missingRequiredShots(eq);
-    const retakeShot = dark ? (eq.photos || []).find((p) => /dark/i.test(p.note || ''))?.promptType || 'overall' : (miss[0] && miss[0].id) || '';
+    const retakeShot = dark ? (eq.photos || []).find((p) => /dark|blur|duplicate/i.test(p.note || ''))?.promptType || 'overall' : (miss[0] && miss[0].id) || '';
     return `<div class="card danger-border punch-card" data-id="${eq.id}">
       <div class="card-title"><span class="tag-badge">${escapeHtml(eq.tag||'?')}</span></div>
       <div class="card-meta">${reasons.map((r) => r.label).join(' · ')}</div>
@@ -2149,7 +2399,7 @@ async function leaveSite(opts = {}) {
     openReadyCheck();
     return;
   }
-  await exportVisitPackage({ share: true });
+  await exportVisitPackage({ share: true, client: true });
 }
 
 async function deleteVisit() {
@@ -2419,6 +2669,8 @@ function saveFix(pos) {
   };
   try { sessionStorage.setItem('fv_gps', JSON.stringify(lastFix)); } catch (e) {}
   updateGpsStatusUi();
+  if (cameraOpen) updateCamChrome();
+  void refreshWalkHud();
   return lastFix;
 }
 function gpsErrorMessage(err) {
@@ -2982,11 +3234,11 @@ async function saveQuickEq() {
   showToast('Equipment created');
 }
 
-async function generatePDF() {
+async function generatePDF(opts = {}) {
   if (!window.jspdf || !window.jspdf.jsPDF) { showToast('PDF library not loaded'); return; }
-  const type = $('report-type').value;
-  const company = $('report-company').value.trim();
-  $('modal-report').classList.add('hidden');
+  const type = opts.type || $('report-type')?.value || 'full';
+  const company = opts.company != null ? opts.company : ($('report-company')?.value.trim() || '');
+  if (!opts.silent) $('modal-report')?.classList.add('hidden');
   const visit = await dbGet(STORE_VISITS, currentVisitId);
   if (!visit) return;
   let items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
@@ -3089,6 +3341,7 @@ async function generatePDF() {
     }
   }
   if (!items.length) { doc.setFontSize(11); doc.text('No equipment items.', margin, y); }
+  if (opts.returnBlob) return doc.output('blob');
   doc.save(`FieldVault_${(visit.title||'Visit').replace(/[^a-z0-9]/gi,'_').slice(0,30)}_${type}.pdf`);
   showToast('PDF ready');
 }
@@ -3196,9 +3449,15 @@ async function initMap() {
   window._mapStreet = street;
   window._mapSat = satellite;
 
+  const annotated = items.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) }));
+  const gap = nextWalkGap(annotated, lastFix?.lat ?? withGps[0]?.lat, lastFix?.lng ?? withGps[0]?.lng);
+  if ($('map-walk-hud') && $('map-walk-hud-text')) {
+    $('map-walk-hud').classList.toggle('hidden', !gap);
+    $('map-walk-hud-text').textContent = walkGapText(gap);
+  }
+
   const bounds = [];
   for (const eq of withGps) {
-    // nearest neighbor distance for context
     let nearInfo = '';
     let best = Infinity, bestTag = '';
     for (const o of withGps) {
@@ -3207,13 +3466,32 @@ async function initMap() {
       if (d < best) { best = d; bestTag = o.tag || ''; }
     }
     if (best < Infinity) nearInfo = `<br><small>Nearest: ${escapeHtml(bestTag)} (${formatDist(best)})</small>`;
-    const m = L.marker([eq.lat, eq.lng])
+    const empty = !(eq.photos || []).length;
+    const isGap = gap?.eq && gap.eq.id === eq.id;
+    const color = isGap ? '#e07a5f' : (empty || returnWalkMode ? '#d4a017' : '#8fb8c9');
+    const m = L.circleMarker([eq.lat, eq.lng], {
+      radius: isGap ? 11 : 7,
+      color,
+      fillColor: color,
+      fillOpacity: 0.9,
+      weight: 2
+    })
       .addTo(mapInstance)
-      .bindPopup(`<strong>${escapeHtml(eq.tag || '')}</strong><br>${escapeHtml(eq.locationDesc || '')}${nearInfo}<br>
+      .bindPopup(`<strong>${escapeHtml(eq.tag || '')}</strong>${isGap ? '<br>Next gap' : ''}${empty ? '<br>No photos yet' : ''}<br>${escapeHtml(eq.locationDesc || '')}${nearInfo}<br>
         <a href="https://maps.apple.com/?daddr=${eq.lat},${eq.lng}&q=${encodeURIComponent(eq.tag||'Equipment')}" target="_blank">Navigate (Apple)</a> ·
         <a href="https://www.google.com/maps/dir/?api=1&destination=${eq.lat},${eq.lng}" target="_blank">Navigate (Google)</a>`);
     mapMarkers.push(m);
     bounds.push([eq.lat, eq.lng]);
+    if (isGap) m.openPopup();
+  }
+  if (lastFix) {
+    L.circleMarker([lastFix.lat, lastFix.lng], { radius: 8, color: '#5ee0b5', fillColor: '#5ee0b5', fillOpacity: 0.85 })
+      .addTo(mapInstance)
+      .bindPopup('You are here');
+    bounds.push([lastFix.lat, lastFix.lng]);
+    void prefetchWalkTiles(lastFix.lat, lastFix.lng);
+  } else if (withGps[0]) {
+    void prefetchWalkTiles(withGps[0].lat, withGps[0].lng);
   }
   if (bounds.length > 1) mapInstance.fitBounds(bounds, { padding: [40, 40] });
   else if (bounds.length === 1) mapInstance.setView(bounds[0], 18);
@@ -3223,10 +3501,9 @@ async function initMap() {
     L.polyline(path.map((p) => [p.lat, p.lng]), { color: '#8fb8c9', weight: 3, opacity: 0.85 }).addTo(mapInstance);
   }
   $('map-legend').innerHTML = withGps.length
-    ? `<div>${withGps.length} equipment with GPS pinned</div><div>Tap a pin for navigation links</div>${path.length >= 2 ? `<div class="walk-line-legend">Walk path · ${path.length} points</div>` : ''}`
+    ? `<div>${withGps.length} pins · you are the green dot · next gap is coral</div><div>Tap a pin for navigation links</div>${path.length >= 2 ? `<div class="walk-line-legend">Walk path · ${path.length} points</div>` : ''}${returnWalkMode ? '<div>Return walk — empty pins still need photos</div>' : ''}`
     : '<div>No GPS points yet. Take photos to auto-capture coordinates.</div>';
 
-  // Fix leaflet size after view show
   setTimeout(() => mapInstance.invalidateSize(), 200);
 }
 
@@ -3810,8 +4087,25 @@ async function exportVisitPackage(opts = {}) {
   }
   zip.file('equipment.csv', csv);
 
+  if (opts && opts.client) {
+    showToast('Building client package…');
+    try {
+      const pdf = await generatePDF({
+        type: 'full',
+        company: visit.client || 'FieldVault',
+        returnBlob: true,
+        silent: true
+      });
+      if (pdf) zip.file('CLIENT_PACKAGE.pdf', pdf);
+    } catch (e) {
+      console.warn(e);
+    }
+    const gap = nextWalkGap(items.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) })), lastFix?.lat, lastFix?.lng);
+    zip.file('HANDOFF.html', handoffHtml(visit, items, walkGapText(gap)));
+  }
+
   const blob = await zip.generateAsync({ type: 'blob' });
-  const filename = 'FieldVault_' + safeName(visit.title) + '.zip';
+  const filename = (opts && opts.client ? 'FieldVault_client_' : 'FieldVault_') + safeName(visit.title) + '.zip';
   const file = new File([blob], filename, { type: 'application/zip' });
   if (opts && opts.share && navigator.canShare && navigator.canShare({ files: [file] })) {
     try {
@@ -3831,7 +4125,54 @@ async function exportVisitPackage(opts = {}) {
 }
 
 async function shareVisitPackage() {
-  await exportVisitPackage({ share: true });
+  await exportVisitPackage({ share: true, client: true });
+}
+
+async function sendToClient() {
+  if (!currentVisitId) { showToast('Open a visit first'); return; }
+  await exportVisitPackage({ share: true, client: true });
+}
+
+async function openHandoffModal() {
+  if (!currentVisitId) { showToast('Open a visit first'); return; }
+  const visit = await dbGet(STORE_VISITS, currentVisitId);
+  const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
+  if ($('handoff-qr')) $('handoff-qr').src = handoffQrUrl(visit, items);
+  if ($('handoff-line')) $('handoff-line').textContent = handoffLine(visit, items);
+  $('modal-handoff')?.classList.remove('hidden');
+}
+
+async function shareHandoffHtml() {
+  if (!currentVisitId) { showToast('Open a visit first'); return; }
+  const visit = await dbGet(STORE_VISITS, currentVisitId);
+  const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
+  const gap = nextWalkGap(items.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) })), lastFix?.lat, lastFix?.lng);
+  const html = handoffHtml(visit, items, walkGapText(gap));
+  const file = new File([html], 'FieldVault_handoff.html', { type: 'text/html' });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ title: visit.title || 'FieldVault', files: [file] });
+      showToast('Handoff shared');
+      return;
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;
+    }
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(file);
+  a.download = file.name;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  showToast('Handoff downloaded');
+}
+
+async function addToHomeScreen() {
+  if (canInstallPwa()) {
+    const ok = await promptInstallPwa();
+    showToast(ok ? 'Added to Home Screen' : 'Install dismissed');
+    return;
+  }
+  showToast('Use your browser Share menu → Add to Home Screen');
 }
 
 // ===== Backup / restore =====
@@ -3921,6 +4262,10 @@ function initEvents() {
     }
   });
   $('fv-cam-shutter')?.addEventListener('click', () => void shutterFieldCamera());
+  $('fv-cam-torch')?.addEventListener('click', () => void toggleTorch());
+  document.querySelectorAll('.fv-cam-issue').forEach((b) => {
+    b.addEventListener('click', () => void flagCameraIssue(b.dataset.issue));
+  });
   $('fv-cam-name')?.addEventListener('click', openNamePinModal);
   $('fv-cam-newpin')?.addEventListener('click', () => {
     forceNewPin = true;
@@ -4068,6 +4413,10 @@ function initEvents() {
   });
   $('more-modeling')?.addEventListener('click', () => { setMoreOpen(false); toggleModelingMode(); });
   $('more-backup')?.addEventListener('click', () => { setMoreOpen(false); backupAllData(); });
+  $('more-install')?.addEventListener('click', () => { setMoreOpen(false); void addToHomeScreen(); });
+  $('more-handoff')?.addEventListener('click', () => { setMoreOpen(false); void openHandoffModal(); });
+  $('more-export')?.addEventListener('click', () => { setMoreOpen(false); void exportVisitPackage(); });
+  $('more-pdf')?.addEventListener('click', () => { setMoreOpen(false); $('modal-report')?.classList.remove('hidden'); });
   $('btn-gmap-satellite')?.addEventListener('click', () => setGlobalMapLayer('satellite'));
   $('btn-gmap-street')?.addEventListener('click', () => setGlobalMapLayer('street'));
   $('btn-gmap-locate')?.addEventListener('click', globalMapLocate);
@@ -4080,6 +4429,11 @@ function initEvents() {
   $('btn-share-package')?.addEventListener('click', shareVisitPackage);
   $('btn-leave-site')?.addEventListener('click', () => void leaveSite());
   $('btn-leave-site-ready')?.addEventListener('click', () => void leaveSite());
+  $('btn-send-client')?.addEventListener('click', () => void sendToClient());
+  $('btn-handoff')?.addEventListener('click', () => void openHandoffModal());
+  $('btn-handoff-close')?.addEventListener('click', () => $('modal-handoff')?.classList.add('hidden'));
+  $('btn-handoff-done')?.addEventListener('click', () => $('modal-handoff')?.classList.add('hidden'));
+  $('btn-handoff-html')?.addEventListener('click', () => void shareHandoffHtml());
   $('btn-gps-retry')?.addEventListener('click', () => {
     gpsDenied = false;
     renderGpsBanner();
@@ -4114,6 +4468,8 @@ async function init() {
     initSpeech();
     initEvents();
     bindKeyboardSafe();
+    bindFieldShutterKeys();
+    bindCompass();
     loadCachedFix();
     updateGpsStatusUi();
     if (localStorage.getItem('fieldvault_modeling') === '1') {
