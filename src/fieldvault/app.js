@@ -714,7 +714,7 @@ function renderStickyNext(photos) {
   document.body.classList.add('has-sticky-next');
   const copyEl = $('sticky-next-copy');
   if (copyEl) {
-    if (!currentVisitId) {
+    if (!currentVisitId && !latestVisitId) {
       copyEl.innerHTML = '<strong>Take</strong> Title once, then camera + GPS';
     } else if (onEq && nxt) {
       copyEl.innerHTML = '<strong>Next photo</strong> ' + escapeHtml(nxt.label);
