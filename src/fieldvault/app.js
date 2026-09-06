@@ -565,7 +565,9 @@ function startCamListen() {
   currentVoiceTarget = null;
   voiceTargetId = null;
   camListenOn = true;
-  try { recognition.start(); } catch (e) {}
+  try { recognition.start(); } catch (e) {
+    camListenOn = false;
+  }
   updateCamChrome();
 }
 
@@ -1741,6 +1743,11 @@ function initSpeech() {
     };
     recognition.onerror = (e) => {
       if (e.error === 'no-speech' || e.error === 'aborted') return;
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+        camListenOn = false;
+        updateCamChrome();
+        return;
+      }
       console.warn('Speech error', e.error);
     };
     recognition.onend = () => {
