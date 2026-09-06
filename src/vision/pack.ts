@@ -180,20 +180,29 @@ function geoJsonExportKeep() {
   return JSON.stringify({ type: "FeatureCollection", features: feats }, null, 2);
 }
 
-export function fieldVaultWalk() {
-  const facts = listFacts();
-  const wps = listWaypoints();
-  const rows = [
-    ...facts.map((f) => ({ name: f.k, tag: f.v, notes: f.v, source: "aether-fact" })),
-    ...wps.map((w) => ({ name: w.name, tag: w.kind, wx: w.wx, wy: w.wy, source: "aether-wp" })),
-    ...roomList().map((m) => ({
-      name: m.name || m.class,
-      tag: m.class,
-      wx: m.wx,
-      wy: m.wy,
-      source: "aether-room",
-    })),
-  ];
+export async function fieldVaultWalk() {
+  const { exportFieldVaultRows } = await import("@/fieldvault/bridge");
+  let rows: unknown[] = [];
+  try {
+    rows = await exportFieldVaultRows();
+  } catch {
+    rows = [];
+  }
+  if (!rows.length) {
+    const facts = listFacts();
+    const wps = listWaypoints();
+    rows = [
+      ...facts.map((f) => ({ name: f.k, tag: f.v, notes: f.v, source: "aether-fact" })),
+      ...wps.map((w) => ({ name: w.name, tag: w.kind, wx: w.wx, wy: w.wy, source: "aether-wp" })),
+      ...roomList().map((m) => ({
+        name: m.name || m.class,
+        tag: m.class,
+        wx: m.wx,
+        wy: m.wy,
+        source: "aether-room",
+      })),
+    ];
+  }
   const body = JSON.stringify(rows, null, 2);
   download("fieldvault-walkdown.json", body);
   return body;

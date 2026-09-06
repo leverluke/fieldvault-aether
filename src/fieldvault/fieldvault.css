@@ -633,7 +633,12 @@ body.defense-mode #btn-export-package {
   #btn-new-visit { padding: 8px 10px; font-size: 0.8rem; }
 }
 
+body.commercial-mode .mode-switch { display: none; }
 body.commercial-mode #mode-banner { display: none; }
+.facility-chips { margin-top: 8px; }
+.facility-home { margin: 0 0 16px; }
+.walk-line-legend { color: var(--text-muted); font-size: 0.85rem; margin-top: 8px; }
+.punch-close { margin-top: 8px; }
 body.commercial-mode #btn-model-mode { display: none; }
 body.defense-mode .action-grid { display: none; }
 body.defense-mode .coach-card { display: none; }

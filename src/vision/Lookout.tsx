@@ -642,10 +642,10 @@ export function Lookout({ backHref }: { backHref: string }) {
                 onChange={(e) => {
                   const f = e.target.files?.[0];
                   if (!f) return;
-                  void f.text().then((t) => {
+                  void f.text().then(async (t) => {
                     try {
-                      const n = importFieldVault(JSON.parse(t));
-                      setStatus(`Imported ${n} FieldVault rows.`);
+                      const n = await importFieldVault(JSON.parse(t));
+                      setStatus(`Imported ${n} FieldVault rows into the walkdown.`);
                     } catch {
                       setStatus("Not a FieldVault JSON.");
                     }

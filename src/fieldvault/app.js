@@ -1,11 +1,10 @@
 // @ts-nocheck
 /* FieldVault v3 – Expanded local-first version */
-/* FieldVault v3 – Expanded local-first version */
-const DB_NAME = 'FieldVaultDB';
-const DB_VERSION = 2;
-const STORE_VISITS = 'visits';
-const STORE_AREAS = 'areas';
-const STORE_EQUIPMENT = 'equipment';
+import { DB_NAME, DB_VERSION, STORE_AREAS, STORE_EQUIPMENT, STORE_PHOTOS, STORE_VISITS } from './schema.js';
+import { clusterByAccuracy, csvCell, uniqueFacilities, walkGeoJson, walkLine } from './format.js';
+import { blobToDataUrl, canvasJpegBlob, dataUrlToBlob, ingestPhotoFile } from './photos.ts';
+import { readNameplate } from './ocr-plate.ts';
+import { ensureFieldVaultLibs } from './libs.ts';
 
 let db = null;
 let currentView = 'visits';
@@ -31,6 +30,9 @@ let lastAiResult = '';
 let aiPhotoTargetId = null;
 
 let productMode = 'commercial';
+let pendingCameraAfterVisit = false;
+let stickyNextShotId = null;
+let latestVisitId = null;
 
 const COPY = {
   commercial: {
@@ -333,6 +335,35 @@ function armCameraCapture(shotId) {
   cam.click();
 }
 
+function startFastTake(shotId) {
+  restoreSession();
+  if (!currentVisitId && latestVisitId) currentVisitId = latestVisitId;
+  if (!currentVisitId) {
+    pendingCameraAfterVisit = true;
+    openVisitModal(false);
+    return;
+  }
+  startGpsWatch();
+  persistSession();
+  armCameraCapture(shotId || null);
+  reconcileEquipmentForVisit();
+}
+
+async function reconcileEquipmentForVisit() {
+  if (!currentEquipmentId || !currentVisitId) return;
+  try {
+    const eq = await dbGet(STORE_EQUIPMENT, currentEquipmentId);
+    if (!eq || eq.visitId !== currentVisitId) {
+      currentEquipmentId = null;
+      if ($('eq-tag')) $('eq-tag').value = '';
+      persistSession();
+    }
+  } catch (e) {
+    currentEquipmentId = null;
+    if ($('eq-tag')) $('eq-tag').value = '';
+  }
+}
+
 function shot(id, label, required, tip) {
   return { id, label, required: !!required, tip: tip || '' };
 }
@@ -551,8 +582,9 @@ function populatePhotoTypeSelect() {
   ).join('');
   if (cur) sel.value = cur;
 }
-function renderShotGuide(photos) {
+async function renderShotGuide(photos) {
   window.__fvCurrentPhotos = photos || [];
+  await hydratePhotos(photos);
   const list = $('shot-guide-list');
   if (!list) return;
   const shots = shotsFor(selectedEqType);
@@ -586,7 +618,7 @@ function renderShotGuide(photos) {
     const tip = (!ok && s.tip) ? `<div class="shot-tip">${escapeHtml(s.tip)}</div>` : '';
     const matches = (photos || []).filter(p => p.promptType === s.id);
     const thumb = matches.length
-      ? `<button type="button" class="shot-thumb" data-photoid="${matches[0].id}"><img src="${matches[0].dataUrl}" alt="">${matches.length>1?`<span class="shot-count">${matches.length}</span>`:''}</button>`
+      ? `<button type="button" class="shot-thumb" data-photoid="${matches[0].id}"><img src="${matches[0]._url || matches[0].dataUrl || ''}" alt="">${matches.length>1?`<span class="shot-count">${matches.length}</span>`:''}</button>`
       : `<span class="shot-thumb empty" aria-hidden="true"></span>`;
     return `<div class="shot-row ${ok?'done':''} ${needed?'needed':''}" data-shot="${s.id}">
       ${thumb}
@@ -606,7 +638,7 @@ function renderShotGuide(photos) {
       const p = (photos || []).find(x => x.id === id);
       if (!p) return;
       currentPhotoId = id;
-      openMarkup(p.dataUrl, p);
+      openMarkup(p._url || p.dataUrl, p);
     });
   });
   renderStickyNext(photos);
@@ -667,28 +699,29 @@ function renderKindCards(selected) {
 function renderStickyNext(photos) {
   const bar = $('sticky-next');
   if (!bar) return;
-  const onEq = currentView === 'view-equipment-detail';
-  if (!onEq || isDefense()) {
+  if (currentView === 'view-markup') {
     bar.classList.add('hidden');
     document.body.classList.remove('has-sticky-next');
+    stickyNextShotId = null;
     return;
   }
   const shots = shotsFor(selectedEqType);
   const taken = guidedTypes(photos);
   const nxt = shots.find(s => s.required && !taken.has(s.id)) || shots.find(s => !taken.has(s.id));
-  if (!nxt) {
-    bar.classList.add('hidden');
-    document.body.classList.remove('has-sticky-next');
-    return;
-  }
+  const onEq = currentView === 'view-equipment-detail';
+  stickyNextShotId = onEq && nxt ? nxt.id : null;
   bar.classList.remove('hidden');
   document.body.classList.add('has-sticky-next');
   const copyEl = $('sticky-next-copy');
-  if (copyEl) copyEl.innerHTML = '<strong>Next photo</strong> ' + escapeHtml(nxt.label);
-  const take = $('btn-sticky-take');
-  if (take) take.onclick = () => {
-    armCameraCapture(nxt.id);
-  };
+  if (copyEl) {
+    if (!currentVisitId) {
+      copyEl.innerHTML = '<strong>Take</strong> Title once, then camera + GPS';
+    } else if (onEq && nxt) {
+      copyEl.innerHTML = '<strong>Next photo</strong> ' + escapeHtml(nxt.label);
+    } else {
+      copyEl.innerHTML = '<strong>Take</strong> Camera + GPS — no form';
+    }
+  }
 }
 
 async function renderCrumbs() {
@@ -844,6 +877,9 @@ function openDB() {
         es.createIndex('visitId', 'visitId', { unique: false });
         es.createIndex('areaId', 'areaId', { unique: false });
       }
+      if (!database.objectStoreNames.contains(STORE_PHOTOS)) {
+        database.createObjectStore(STORE_PHOTOS, { keyPath: 'id' });
+      }
     };
     req.onsuccess = (e) => { db = e.target.result; resolve(db); };
     req.onerror = () => reject(req.error);
@@ -874,6 +910,61 @@ function dbGetAll(store) {
     req.onerror = () => rej(req.error);
   });
 }
+async function putPhotoBlob(blob, mime) {
+  const rec = { id: uuid(), blob, mime: mime || blob.type || 'image/jpeg', createdAt: Date.now() };
+  await dbPut(STORE_PHOTOS, rec);
+  return rec.id;
+}
+
+async function photoSrc(p) {
+  if (!p) return '';
+  if (p._url) return p._url;
+  if (p.blobId) {
+    const rec = await dbGet(STORE_PHOTOS, p.blobId);
+    if (rec?.blob) {
+      p._url = URL.createObjectURL(rec.blob);
+      return p._url;
+    }
+  }
+  return p.dataUrl || '';
+}
+
+async function photoDataUrl(p) {
+  if (p?.dataUrl) return p.dataUrl;
+  if (p?.blobId) {
+    const rec = await dbGet(STORE_PHOTOS, p.blobId);
+    if (rec?.blob) return blobToDataUrl(rec.blob);
+  }
+  return '';
+}
+
+async function hydratePhotos(photos) {
+  for (const p of photos || []) {
+    if (!p._url) p._url = await photoSrc(p);
+  }
+  return photos || [];
+}
+
+async function migrateEquipmentPhotos(eq) {
+  if (!eq || !eq.photos) return eq;
+  let changed = false;
+  for (const p of eq.photos) {
+    if (p.dataUrl && !p.blobId) {
+      try {
+        const blob = dataUrlToBlob(p.dataUrl);
+        p.blobId = await putPhotoBlob(blob, 'image/jpeg');
+        delete p.dataUrl;
+        changed = true;
+      } catch (e) {}
+    }
+  }
+  if (changed) {
+    eq.updatedAt = Date.now();
+    await dbPut(STORE_EQUIPMENT, eq);
+  }
+  return eq;
+}
+
 function dbDelete(store, id) {
   return new Promise((res, rej) => {
     const tx = db.transaction(store, 'readwrite');
@@ -902,9 +993,11 @@ function showView(viewId) {
   // Bottom nav: hide only on markup
   const hideNav = ['view-markup'];
   document.body.classList.toggle('hide-bottom-nav', hideNav.includes(viewId));
-  if (viewId !== 'view-equipment-detail') {
+  if (viewId === 'view-markup') {
     document.body.classList.remove('has-sticky-next');
     $('sticky-next')?.classList.add('hidden');
+  } else {
+    renderStickyNext(window.__fvCurrentPhotos || []);
   }
 
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
@@ -1148,6 +1241,7 @@ async function renderVisitsList(filter = '') {
   const equipment = await dbGetAll(STORE_EQUIPMENT);
   const areas = await dbGetAll(STORE_AREAS);
   visits.sort((a,b) => (b.updatedAt||0) - (a.updatedAt||0));
+  latestVisitId = visits[0] ? visits[0].id : null;
 
   const listEl = $('visits-list');
   const emptyEl = $('visits-empty');
@@ -1190,6 +1284,42 @@ async function renderVisitsList(filter = '') {
       loadVisitDetail(currentVisitId);
     });
   });
+  renderStickyNext(window.__fvCurrentPhotos || []);
+  renderFacilityHome(visits, equipment);
+}
+
+function renderFacilityChips(visits) {
+  const wrap = $('facility-chips');
+  if (!wrap) return;
+  const facs = uniqueFacilities(visits || []);
+  if (!facs.length) { wrap.innerHTML = ''; return; }
+  wrap.innerHTML = facs.slice(0, 6).map((f) =>
+    `<button type="button" class="chip" data-client="${escapeHtml(f.client)}" data-facility="${escapeHtml(f.facility)}">${escapeHtml([f.client, f.facility].filter(Boolean).join(' · '))}</button>`
+  ).join('');
+  wrap.querySelectorAll('.chip').forEach((b) => {
+    b.addEventListener('click', () => {
+      if ($('visit-client')) $('visit-client').value = b.dataset.client || '';
+      if ($('visit-facility')) $('visit-facility').value = b.dataset.facility || '';
+    });
+  });
+}
+
+function renderFacilityHome(visits, equipment) {
+  const wrap = $('facility-home');
+  if (!wrap) return;
+  const facs = uniqueFacilities(visits || []);
+  if (!facs.length) { wrap.classList.add('hidden'); wrap.innerHTML = ''; return; }
+  wrap.classList.remove('hidden');
+  wrap.innerHTML = '<p class="help-text">Walk this site again</p>' + facs.slice(0, 4).map((f) => {
+    const prior = (visits || []).find((v) => (v.client || '') === f.client && (v.facility || '') === f.facility);
+    const n = (equipment || []).filter((e) => e.visitId === (prior && prior.id)).length;
+    return `<button type="button" class="btn-secondary" data-visit="${prior ? prior.id : ''}">${escapeHtml([f.client, f.facility].filter(Boolean).join(' · '))}${n ? ' · ' + n + ' tags' : ''}</button>`;
+  }).join(' ');
+  wrap.querySelectorAll('button[data-visit]').forEach((b) => {
+    b.addEventListener('click', () => {
+      if (b.dataset.visit) walkAgainFrom(b.dataset.visit);
+    });
+  });
 }
 
 function openVisitModal(edit=false) {
@@ -1204,6 +1334,7 @@ function openVisitModal(edit=false) {
     currentVisitId = null;
   }
   renderKindCards($('visit-template')?.value || 'walkdown');
+  dbGetAll(STORE_VISITS).then(renderFacilityChips).catch(() => {});
   $('modal-visit').classList.remove('hidden');
 }
 
@@ -1212,6 +1343,7 @@ async function saveVisit() {
   if (!title) { showToast('Title required'); return; }
   const now = Date.now();
   const creating = !currentVisitId;
+  const armAfterCreate = creating && pendingCameraAfterVisit;
   let visit;
   if (!creating) {
     visit = await dbGet(STORE_VISITS, currentVisitId);
@@ -1234,6 +1366,12 @@ async function saveVisit() {
       createdAt: now, updatedAt: now
     };
     currentVisitId = visit.id;
+    latestVisitId = visit.id;
+    if (armAfterCreate) {
+      pendingCameraAfterVisit = false;
+      startGpsWatch();
+      armCameraCapture();
+    }
   }
   await dbPut(STORE_VISITS, visit);
   if (creating) await seedTemplateAreas(visit);
@@ -1241,6 +1379,62 @@ async function saveVisit() {
   showToast(creating ? 'Visit saved. Suggested plant areas are listed — add equipment as you walk.' : 'Visit saved');
   showView('view-visit-detail');
   loadVisitDetail(currentVisitId);
+}
+
+async function walkAgainFrom(visitId) {
+  const src = await dbGet(STORE_VISITS, visitId || currentVisitId);
+  if (!src) { showToast('Open a visit first'); return; }
+  const now = Date.now();
+  const visit = {
+    id: uuid(),
+    title: (src.title || 'Visit') + ' (return)',
+    client: src.client || '',
+    facility: src.facility || '',
+    date: new Date().toISOString().slice(0, 10),
+    overallNotes: '',
+    template: src.template || 'walkdown',
+    parentVisitId: src.id,
+    createdAt: now,
+    updatedAt: now
+  };
+  await dbPut(STORE_VISITS, visit);
+  const areas = await dbGetByIndex(STORE_AREAS, 'visitId', src.id);
+  const areaMap = {};
+  for (const a of areas) {
+    const next = { ...a, id: uuid(), visitId: visit.id, createdAt: now, updatedAt: now };
+    areaMap[a.id] = next.id;
+    await dbPut(STORE_AREAS, next);
+  }
+  const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', src.id);
+  for (const eq of items) {
+    await dbPut(STORE_EQUIPMENT, {
+      id: uuid(),
+      visitId: visit.id,
+      areaId: eq.areaId ? areaMap[eq.areaId] || '' : '',
+      tag: eq.tag,
+      eqType: eq.eqType || 'other',
+      locationDesc: eq.locationDesc || '',
+      service: eq.service || '',
+      pid: eq.pid || '',
+      lineNo: eq.lineNo || '',
+      mfr: eq.mfr || '',
+      model: eq.model || '',
+      serial: eq.serial || '',
+      lat: eq.lat ?? null,
+      lng: eq.lng ?? null,
+      gpsAcc: eq.gpsAcc,
+      notes: '',
+      photos: [],
+      needsFollowup: false,
+      createdAt: now,
+      updatedAt: now
+    });
+  }
+  currentVisitId = visit.id;
+  latestVisitId = visit.id;
+  showToast('Return walk ready — same tags, empty photos');
+  showView('view-visit-detail');
+  loadVisitDetail(visit.id);
 }
 
 async function loadVisitDetail(id) {
@@ -1359,7 +1553,7 @@ function renderCompleteness(items) {
 async function openReadyCheck() {
   const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
   showView('view-ready-check');
-  $('header-title').textContent = isDefense() ? 'Processing Check' : "What's missing?";
+  $('header-title').textContent = isDefense() ? 'Processing Check' : 'Punch list';
   const list = $('ready-list');
   const c = copy();
   const hard = items.filter(e => {
@@ -1386,14 +1580,28 @@ async function openReadyCheck() {
     return `<div class="card danger-border" data-id="${eq.id}">
       <div class="card-title"><span class="tag-badge">${escapeHtml(eq.tag||'?')}</span></div>
       <div class="card-meta">${issues.join(' · ')}</div>
+      ${eq.needsFollowup ? `<button type="button" class="btn-secondary btn-sm punch-close" data-close="${eq.id}">Close follow-up</button>` : ''}
     </div>`;
   }).join('');
   list.innerHTML = cards;
   list.querySelectorAll('.card').forEach(card => {
-    card.addEventListener('click', () => {
+    card.addEventListener('click', (ev) => {
+      if (ev.target.closest('[data-close]')) return;
       currentEquipmentId = card.dataset.id;
       showView('view-equipment-detail');
       loadEquipmentDetail(currentEquipmentId);
+    });
+  });
+  list.querySelectorAll('[data-close]').forEach((b) => {
+    b.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const eq = await dbGet(STORE_EQUIPMENT, b.dataset.close);
+      if (!eq) return;
+      eq.needsFollowup = false;
+      eq.updatedAt = Date.now();
+      await dbPut(STORE_EQUIPMENT, eq);
+      showToast('Follow-up closed');
+      openReadyCheck();
     });
   });
 }
@@ -1403,7 +1611,12 @@ async function deleteVisit() {
   const areas = await dbGetByIndex(STORE_AREAS, 'visitId', currentVisitId);
   const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
   for (const a of areas) await dbDelete(STORE_AREAS, a.id);
-  for (const e of items) await dbDelete(STORE_EQUIPMENT, e.id);
+  for (const e of items) {
+    for (const p of e.photos || []) {
+      if (p.blobId) await dbDelete(STORE_PHOTOS, p.blobId).catch(() => {});
+    }
+    await dbDelete(STORE_EQUIPMENT, e.id);
+  }
   await dbDelete(STORE_VISITS, currentVisitId);
   showToast('Visit deleted');
   showView('view-visits');
@@ -1547,7 +1760,9 @@ async function loadEquipmentDetail(id) {
   document.querySelectorAll('#priority-chips .chip').forEach(c => c.classList.toggle('active', c.dataset.value === selectedPriority));
   await populateAreaSelect(eq.areaId);
   $('btn-delete-equipment').classList.remove('hidden');
+  await migrateEquipmentPhotos(eq);
   const photos = eq.photos || [];
+  await hydratePhotos(photos);
   $('photo-count-badge').textContent = photos.length;
   $('photo-count-badge').className = 'badge ' + (photos.length===0?'danger':photos.length<2?'warn':'ok');
   renderPhotos(photos);
@@ -1563,15 +1778,16 @@ function updatePromptChecks(photos) {
   renderShotGuide(photos || []);
 }
 
-function renderPhotos(photos) {
+async function renderPhotos(photos) {
   const grid = $('photos-grid');
+  await hydratePhotos(photos);
   if (!photos.length) {
     grid.innerHTML = '<p style="color:var(--text-muted);font-size:0.9rem">No photos yet. Use the list above — tap Take on a shot.</p>';
     return;
   }
   grid.innerHTML = photos.map(p => `
     <div class="photo-thumb" data-id="${p.id}">
-      <img src="${p.dataUrl}" alt="">
+      <img src="${p._url || p.dataUrl || ''}" alt="">
       ${p.promptType ? `<div class="photo-type-badge">${escapeHtml(shotLabel(p.promptType, selectedEqType))}</div>` : ''}
       ${p.note ? `<div class="photo-note-badge">${escapeHtml(p.note)}</div>` : ''}
     </div>
@@ -1603,6 +1819,7 @@ async function saveEquipment(opts) {
   eq.locationDesc = $('eq-location').value.trim();
   eq.lat = parseFloat($('eq-lat').value) || null;
   eq.lng = parseFloat($('eq-lng').value) || null;
+  if (eq.lat != null && lastFix) eq.gpsAcc = lastFix.acc;
   eq.condition = selectedCondition || null;
   eq.priority = selectedPriority || null;
   eq.recommendation = $('eq-recommendation').value.trim();
@@ -1846,15 +2063,14 @@ async function handlePhotoSelect(e) {
 
   showToast('Saving photo…');
 
-  let images = [];
+  let ingested = [];
   try {
     for (const f of files) {
-      const raw = await readFileAsDataURL(f);
-      images.push(await compressDataUrl(raw, 0.72, 1600));
+      ingested.push(await ingestPhotoFile(f));
     }
   } catch (err) {
     console.error(err);
-    showToast('Could not read that photo. Try again.');
+    showToast('Could not read that photo. Try HEIC as JPEG, or try again.');
     return;
   }
 
@@ -1884,36 +2100,42 @@ async function handlePhotoSelect(e) {
     eq.photos = eq.photos || [];
     const lockedShot = pendingShotType;
     let lastType = null;
-    for (const dataUrl of images) {
-      let dark = false;
-      try { dark = await isImageDark(dataUrl); } catch (err) {}
+    const newPhotos = [];
+    for (const shot of ingested) {
       const autoType = lockedShot || pendingShotType || nextMissingPromptType(eq.photos, eq.eqType || selectedEqType);
       lastType = autoType;
-      eq.photos.push({
+      let blobId;
+      try {
+        blobId = await putPhotoBlob(shot.blob, shot.mime);
+      } catch (err) {
+        const smaller = await ingestPhotoFile(new File([shot.blob], 'photo.jpg', { type: 'image/jpeg' }), { quality: 0.52, maxDim: 1024 });
+        blobId = await putPhotoBlob(smaller.blob, smaller.mime);
+      }
+      const rec = {
         id: uuid(),
-        dataUrl,
-        note: dark ? 'Possibly dark' : '',
+        blobId,
+        note: shot.dark ? 'Possibly dark' : '',
         promptType: autoType,
-        lat: null,
-        lng: null,
+        lat: shot.exif?.lat ?? null,
+        lng: shot.exif?.lng ?? null,
+        gpsAcc: shot.exif?.acc,
+        source: shot.exif ? 'exif' : null,
         capturedAt: Date.now()
-      });
+      };
+      eq.photos.push(rec);
+      newPhotos.push({ rec, shot });
+      if (shot.exif && eq.lat == null) {
+        eq.lat = shot.exif.lat;
+        eq.lng = shot.exif.lng;
+        if (shot.exif.acc) eq.gpsAcc = shot.exif.acc;
+        applyFixToForm(shot.exif);
+      }
     }
     setPendingShot(null);
     eq.updatedAt = Date.now();
-    try {
-      await dbPut(STORE_EQUIPMENT, eq);
-    } catch (err) {
-      console.error(err);
-      showToast('Shrinking photo to fit this device…');
-      const start = eq.photos.length - images.length;
-      for (let i = start; i < eq.photos.length; i++) {
-        if (eq.photos[i]) eq.photos[i].dataUrl = await compressDataUrl(eq.photos[i].dataUrl, 0.52, 1024);
-      }
-      await dbPut(STORE_EQUIPMENT, eq);
-    }
+    await dbPut(STORE_EQUIPMENT, eq);
 
-    renderPhotos(eq.photos);
+    await renderPhotos(eq.photos);
     updatePromptChecks(eq.photos);
     if ($('photo-count-badge')) {
       $('photo-count-badge').textContent = String(eq.photos.length);
@@ -1924,7 +2146,14 @@ async function handlePhotoSelect(e) {
     const nxt = shotsFor(eq.eqType || selectedEqType).find(s => !taken.has(s.id));
     showToast(shotName + ' saved' + (nxt ? ' · Next: ' + nxt.label : ' · Listed shots done'));
     persistSession();
-    attachGpsToLatestPhotos(eq.id, images.length);
+    attachGpsToLatestPhotos(eq.id, ingested.length);
+    const tagShot = newPhotos.find((x) => x.rec.promptType === 'tag');
+    if (tagShot) void applyNameplateOcr(eq.id, tagShot.shot.blob);
+    if (currentView === 'view-visit-detail' && currentVisitId) {
+      loadVisitDetail(currentVisitId);
+    } else {
+      renderStickyNext(eq.photos);
+    }
   } catch (err) {
     console.error(err);
     showToast('Photo did not save. Try one more time.');
@@ -1942,12 +2171,48 @@ async function attachGpsToLatestPhotos(eqId, count) {
       if (i >= 0 && photos[i] && photos[i].lat == null) {
         photos[i].lat = fix.lat;
         photos[i].lng = fix.lng;
+        photos[i].gpsAcc = fix.acc;
+        photos[i].source = photos[i].source || 'gps';
       }
     }
-    if (fresh.lat == null) fresh.lat = fix.lat;
-    if (fresh.lng == null) fresh.lng = fix.lng;
+    if (fresh.lat == null) {
+      fresh.lat = fix.lat;
+      fresh.lng = fix.lng;
+      fresh.gpsAcc = fix.acc;
+    }
     applyFixToForm(fix);
     await dbPut(STORE_EQUIPMENT, fresh);
+  } catch (e) {}
+}
+
+async function applyNameplateOcr(eqId, blob) {
+  try {
+    const parsed = await readNameplate(blob);
+    if (!parsed || (!parsed.tag && !parsed.model && !parsed.serial)) return;
+    const eq = await dbGet(STORE_EQUIPMENT, eqId);
+    if (!eq) return;
+    let changed = false;
+    if (parsed.tag && (!eq.tag || /^[A-Za-z]+ \d+$/.test(eq.tag))) {
+      eq.tag = parsed.tag;
+      if ($('eq-tag') && currentEquipmentId === eqId) $('eq-tag').value = parsed.tag;
+      changed = true;
+    }
+    if (parsed.model && !eq.model) {
+      eq.model = parsed.model;
+      if ($('eq-model') && currentEquipmentId === eqId) $('eq-model').value = parsed.model;
+      changed = true;
+    }
+    if (parsed.serial && !eq.serial) {
+      eq.serial = parsed.serial;
+      if ($('eq-serial') && currentEquipmentId === eqId) $('eq-serial').value = parsed.serial;
+      changed = true;
+    }
+    if (changed) {
+      eq.updatedAt = Date.now();
+      await dbPut(STORE_EQUIPMENT, eq);
+      if ($('header-title') && currentEquipmentId === eqId) $('header-title').textContent = eq.tag || 'Equipment';
+      showToast('Nameplate: ' + [parsed.tag, parsed.model, parsed.serial].filter(Boolean).join(' · '));
+    }
   } catch (e) {}
 }
 
@@ -2073,7 +2338,10 @@ async function saveMarkup() {
   if (!eq || !eq.photos) return;
   const photo = eq.photos.find(p => p.id === currentPhotoId);
   if (photo) {
-    photo.dataUrl = dataUrl; photo.note = note; photo.promptType = promptType;
+    photo.blobId = await putPhotoBlob(dataUrlToBlob(dataUrl), 'image/jpeg');
+    delete photo.dataUrl;
+    photo.note = note;
+    photo.promptType = promptType;
     eq.updatedAt = Date.now();
     await dbPut(STORE_EQUIPMENT, eq);
   }
@@ -2083,15 +2351,12 @@ async function saveMarkup() {
 }
 
 function openQuickCapture() {
-  qcPhotos = [];
-  showView('view-quick-capture');
-  $('header-title').textContent = 'Quick Capture';
-  updateQcUI();
+  startFastTake();
 }
 function updateQcUI() {
   $('qc-count').textContent = qcPhotos.length + ' photo' + (qcPhotos.length!==1?'s':'');
   $('btn-qc-assign').disabled = qcPhotos.length === 0;
-  $('qc-preview').innerHTML = qcPhotos.map(p => `<img src="${p.dataUrl}">`).join('');
+  $('qc-preview').innerHTML = qcPhotos.map(p => `<img src="${p._url || p.dataUrl || ''}">`).join('');
 }
 async function handleQcPhotos(e) {
   const files = Array.from(e.target.files || []);
@@ -2101,15 +2366,22 @@ async function handleQcPhotos(e) {
   const images = [];
   try {
     for (const f of files) {
-      const raw = await readFileAsDataURL(f);
-      images.push(await compressDataUrl(raw, 0.72, 1600));
+      images.push(await ingestPhotoFile(f));
     }
   } catch (err) {
     showToast('Could not read those photos.');
     return;
   }
-  for (const dataUrl of images) {
-    qcPhotos.push({ id: uuid(), dataUrl, lat: null, lng: null, capturedAt: Date.now() });
+  for (const shot of images) {
+    const blobId = await putPhotoBlob(shot.blob, shot.mime);
+    qcPhotos.push({
+      id: uuid(),
+      blobId,
+      _url: URL.createObjectURL(shot.blob),
+      lat: shot.exif?.lat ?? null,
+      lng: shot.exif?.lng ?? null,
+      capturedAt: Date.now()
+    });
   }
   updateQcUI();
   showToast(images.length + ' added to queue');
@@ -2145,7 +2417,7 @@ async function renderAssignUI() {
   });
   const photoSel = $('assign-photo-select');
   photoSel.innerHTML = qcPhotos.map(p => `
-    <div class="photo-thumb ${assignSelectedPhotoIds.has(p.id)?'selected':''}" data-id="${p.id}"><img src="${p.dataUrl}"></div>
+    <div class="photo-thumb ${assignSelectedPhotoIds.has(p.id)?'selected':''}" data-id="${p.id}"><img src="${p._url || p.dataUrl || ''}"></div>
   `).join('');
   photoSel.querySelectorAll('.photo-thumb').forEach(t => {
     t.addEventListener('click', () => {
@@ -2167,7 +2439,8 @@ async function confirmAssign() {
     const autoType = nextMissingPromptType(eq.photos, eq.eqType || 'other');
     eq.photos.push({
       id: p.id,
-      dataUrl: p.dataUrl,
+      blobId: p.blobId,
+      dataUrl: p.blobId ? undefined : p.dataUrl,
       note: '',
       promptType: autoType,
       lat: p.lat || null,
@@ -2210,6 +2483,7 @@ async function saveQuickEq() {
 }
 
 async function generatePDF() {
+  if (!window.jspdf || !window.jspdf.jsPDF) { showToast('PDF library not loaded'); return; }
   const type = $('report-type').value;
   const company = $('report-company').value.trim();
   $('modal-report').classList.add('hidden');
@@ -2295,11 +2569,13 @@ async function generatePDF() {
         for (const photo of eq.photos) {
           if (y > 600) { doc.addPage(); y = margin; }
           try {
-            const props = doc.getImageProperties(photo.dataUrl);
+            const src = await photoDataUrl(photo);
+            if (!src) continue;
+            const props = doc.getImageProperties(src);
             let iw = props.width, ih = props.height;
             const ratio = Math.min(contentW/iw, 200/ih);
             iw *= ratio; ih *= ratio;
-            doc.addImage(photo.dataUrl, 'JPEG', margin, y, iw, ih);
+            doc.addImage(src, 'JPEG', margin, y, iw, ih);
             y += ih + 6;
             const cap = [photo.promptType ? shotLabel(photo.promptType, eq.eqType) : '', photo.note].filter(Boolean).join(' — ');
             if (cap) { doc.setFontSize(9); doc.setTextColor(80); doc.text(cap, margin, y); doc.setTextColor(0); y += 12; }
@@ -2341,7 +2617,7 @@ async function openPhotosLibrary() {
   rerender();
 }
 
-function renderPhotosLibrary(items, filterId, shotId) {
+async function renderPhotosLibrary(items, filterId, shotId) {
   const grid = $('photos-library-grid');
   let photos = [];
   for (const eq of items) {
@@ -2355,9 +2631,10 @@ function renderPhotosLibrary(items, filterId, shotId) {
     grid.innerHTML = '<p style="color:var(--text-muted)">No photos yet for this visit.</p>';
     return;
   }
+  await hydratePhotos(photos);
   grid.innerHTML = photos.map(p => `
     <div class="photo-thumb" data-eq="${p.eqId}" data-photo="${p.id}">
-      <img src="${p.dataUrl}" alt="">
+      <img src="${p._url || p.dataUrl || ''}" alt="">
       ${p.promptType ? `<div class="photo-type-badge">${escapeHtml(shotLabel(p.promptType, p.eqType))}</div>` : ''}
       <div class="photo-lib-meta">
         <div class="tag">${escapeHtml(p.tag || '')}</div>
@@ -2384,6 +2661,7 @@ async function openMapView() {
 }
 
 async function initMap() {
+  if (typeof L === 'undefined') { showToast('Map library not loaded'); return; }
   const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
   const withGps = items.filter(e => e.lat != null && e.lng != null);
 
@@ -2439,8 +2717,12 @@ async function initMap() {
   if (bounds.length > 1) mapInstance.fitBounds(bounds, { padding: [40, 40] });
   else if (bounds.length === 1) mapInstance.setView(bounds[0], 18);
 
+  const path = walkLine(items);
+  if (path.length >= 2) {
+    L.polyline(path.map((p) => [p.lat, p.lng]), { color: '#8fb8c9', weight: 3, opacity: 0.85 }).addTo(mapInstance);
+  }
   $('map-legend').innerHTML = withGps.length
-    ? `<div>${withGps.length} equipment with GPS pinned</div><div>Tap a pin for navigation links</div>`
+    ? `<div>${withGps.length} equipment with GPS pinned</div><div>Tap a pin for navigation links</div>${path.length >= 2 ? `<div class="walk-line-legend">Walk path · ${path.length} points</div>` : ''}`
     : '<div>No GPS points yet. Take photos to auto-capture coordinates.</div>';
 
   // Fix leaflet size after view show
@@ -2508,7 +2790,8 @@ async function analyzeCurrentPhoto() {
   showToast('Analyzing photo…');
   try {
     // Use a compressed data URL if huge
-    let dataUrl = photo.dataUrl;
+    let dataUrl = await photoDataUrl(photo);
+    if (!dataUrl) { showToast('Photo not readable'); return; }
     if (dataUrl.length > 1_500_000) {
       dataUrl = await compressDataUrl(dataUrl, 0.6, 1280);
     }
@@ -2628,9 +2911,10 @@ function renderGlobalPhotos(visits, equipment, visitFilter) {
     grid.innerHTML = '<div class="empty-state"><p>No photos stored yet.<br>Add photos during a visit and they will appear here.</p></div>';
     return;
   }
+  await hydratePhotos(photos);
   grid.innerHTML = photos.map(p => `
     <div class="photo-thumb" data-eq="${p.eqId}" data-visit="${p.visitId}" data-photo="${p.id}">
-      <img src="${p.dataUrl}" alt="">
+      <img src="${p._url || p.dataUrl || ''}" alt="">
       <div class="photo-lib-meta">
         <div class="tag">${escapeHtml(p.tag || '')}</div>
         <div>${escapeHtml(p.visitTitle)}</div>
@@ -2658,6 +2942,7 @@ async function openGlobalMap() {
   const visitMap = Object.fromEntries(visits.map(v => [v.id, v]));
   const withGps = equipment.filter(e => e.lat != null && e.lng != null);
 
+  if (typeof L === 'undefined') { showToast('Map library not loaded'); return; }
   const container = $('global-map-container');
   if (!container) return;
   if (globalMapInstance) {
@@ -2763,23 +3048,7 @@ function toggleModelingMode() {
 
 // ===== GPS clustering =====
 function clusterByGps(items, radiusM = 25) {
-  const pts = items.filter(e => e.lat != null && e.lng != null);
-  const used = new Set();
-  const clusters = [];
-  for (let i = 0; i < pts.length; i++) {
-    if (used.has(pts[i].id)) continue;
-    const group = [pts[i]];
-    used.add(pts[i].id);
-    for (let j = i + 1; j < pts.length; j++) {
-      if (used.has(pts[j].id)) continue;
-      const d = haversineM(pts[i].lat, pts[i].lng, pts[j].lat, pts[j].lng);
-      // also cluster if close to any member
-      const near = group.some(g => haversineM(g.lat, g.lng, pts[j].lat, pts[j].lng) <= radiusM);
-      if (near) { group.push(pts[j]); used.add(pts[j].id); }
-    }
-    clusters.push(group);
-  }
-  return clusters;
+  return clusterByAccuracy(items, radiusM);
 }
 
 let pendingClusters = [];
@@ -2867,6 +3136,9 @@ async function openWalkSequence() {
     }
   }
   events.sort((a,b) => a.t - b.t);
+  for (const ev of events) {
+    if (ev.photo) await photoSrc(ev.photo);
+  }
   const list = $('walk-seq-list');
   if (!events.length) {
     list.innerHTML = '<p class="help-text">Nothing captured yet.</p>';
@@ -2874,7 +3146,7 @@ async function openWalkSequence() {
   }
   list.innerHTML = events.map((ev, i) => {
     const time = ev.t ? new Date(ev.t).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}) : '—';
-    const thumb = ev.photo ? `<img src="${ev.photo.dataUrl}" alt="" style="width:56px;height:56px;object-fit:cover;border-radius:8px">` : '';
+    const thumb = ev.photo ? `<img src="${ev.photo._url || ev.photo.dataUrl || ''}" alt="" style="width:56px;height:56px;object-fit:cover;border-radius:8px">` : '';
     return `<div class="card" data-id="${ev.eq.id}">
       <div class="card-title">${i+1}. <span class="tag-badge">${escapeHtml(ev.eq.tag||'')}</span></div>
       <div class="card-meta">
@@ -2947,7 +3219,7 @@ function safeName(s) {
   return String(s || 'item').replace(/[^a-z0-9._-]+/gi, '_').slice(0, 40);
 }
 
-async function exportVisitPackage() {
+async function exportVisitPackage(opts = {}) {
   if (typeof JSZip === 'undefined') { showToast('ZIP library not loaded'); return; }
   const visit = await dbGet(STORE_VISITS, currentVisitId);
   if (!visit) return;
@@ -2974,7 +3246,11 @@ async function exportVisitPackage() {
       readiness: equipmentReadiness(e)
     }))
   };
-  zip.file('visit.json', JSON.stringify(meta, null, 2));
+  zip.file('visit.json', JSON.stringify({
+    ...meta,
+    walkScore: visitReadinessScore(items)
+  }, null, 2));
+  zip.file('visit.geojson', JSON.stringify(walkGeoJson({ ...visit, readiness: visitReadinessScore(items) }, items.map((e) => ({ ...e, readiness: equipmentReadiness(e) })), areas), null, 2));
   if (isDefense()) {
     zip.file('README.txt', [
       'FieldVault ground-truth / digital-twin package',
@@ -2989,34 +3265,50 @@ async function exportVisitPackage() {
     ].join('\n'));
   }
 
-  const csvCell = (v) => '"' + String(v ?? '').replace(/"/g, '') + '"';
-  let csv = 'tag,type,service,pid,line,mfr,model,serial,area,location,lat,lng,notes,photo_file,view_type\n';
+  let csv = 'tag,type,service,pid,line,mfr,model,serial,area,location,lat,lng,gps_acc,notes,readiness,photo_file,view_type\n';
   let photoIdx = 1;
   for (const eq of items) {
     const areaName = areaMap[eq.areaId] || 'unassigned';
     const folder = 'photos/' + safeName(areaName) + '/' + safeName(eq.tag);
     const photos = eq.photos || [];
     const ident = [eq.tag||'', eq.eqType||'', eq.service||'', eq.pid||'', eq.lineNo||'', eq.mfr||'', eq.model||'', eq.serial||''];
+    const ready = equipmentReadiness(eq);
     if (!photos.length) {
-      csv += ident.map(csvCell).join(',') + ',' + csvCell(areaName) + ',' + csvCell(eq.locationDesc) + ',' + csvCell(eq.lat??'') + ',' + csvCell(eq.lng??'') + ',' + csvCell(eq.notes) + ',,\n';
+      csv += ident.map(csvCell).join(',') + ',' + csvCell(areaName) + ',' + csvCell(eq.locationDesc) + ',' + csvCell(eq.lat??'') + ',' + csvCell(eq.lng??'') + ',' + csvCell(eq.gpsAcc??'') + ',' + csvCell(eq.notes) + ',' + csvCell(ready) + ',,\n';
     }
     for (const p of photos) {
       const fname = safeName(eq.tag) + '_' + (p.promptType || 'photo') + '_' + photoIdx + '.jpg';
       photoIdx++;
-      const data = (p.dataUrl || '').split(',')[1];
+      const src = await photoDataUrl(p);
+      const data = (src || '').split(',')[1];
       if (data) zip.file(folder + '/' + fname, data, { base64: true });
-      csv += ident.map(csvCell).join(',') + ',' + csvCell(areaName) + ',' + csvCell(eq.locationDesc) + ',' + csvCell(p.lat??eq.lat??'') + ',' + csvCell(p.lng??eq.lng??'') + ',' + csvCell(p.note||eq.notes) + ',' + csvCell(folder + '/' + fname) + ',' + csvCell(p.promptType) + '\n';
+      csv += ident.map(csvCell).join(',') + ',' + csvCell(areaName) + ',' + csvCell(eq.locationDesc) + ',' + csvCell(p.lat??eq.lat??'') + ',' + csvCell(p.lng??eq.lng??'') + ',' + csvCell(p.gpsAcc??eq.gpsAcc??'') + ',' + csvCell(p.note||eq.notes) + ',' + csvCell(ready) + ',' + csvCell(folder + '/' + fname) + ',' + csvCell(p.promptType) + '\n';
     }
   }
   zip.file('equipment.csv', csv);
 
   const blob = await zip.generateAsync({ type: 'blob' });
+  const filename = 'FieldVault_' + safeName(visit.title) + '.zip';
+  const file = new File([blob], filename, { type: 'application/zip' });
+  if (opts && opts.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ title: visit.title || 'FieldVault', files: [file] });
+      showToast('Package shared');
+      return;
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;
+    }
+  }
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'FieldVault_' + safeName(visit.title) + '.zip';
+  a.download = filename;
   a.click();
   URL.revokeObjectURL(a.href);
   showToast('Export downloaded');
+}
+
+async function shareVisitPackage() {
+  await exportVisitPackage({ share: true });
 }
 
 // ===== Backup / restore =====
@@ -3024,11 +3316,24 @@ async function backupAllData() {
   const visits = await dbGetAll(STORE_VISITS);
   const areas = await dbGetAll(STORE_AREAS);
   const equipment = await dbGetAll(STORE_EQUIPMENT);
+  const photoRows = await dbGetAll(STORE_PHOTOS).catch(() => []);
+  const photos = {};
+  for (const rec of photoRows) {
+    if (!rec?.blob) continue;
+    photos[rec.id] = await blobToDataUrl(rec.blob);
+  }
+  const slimEq = equipment.map((e) => ({
+    ...e,
+    photos: (e.photos || []).map((p) => {
+      const { dataUrl, _url, ...rest } = p;
+      return rest;
+    })
+  }));
   const payload = {
     app: 'FieldVault',
-    version: 5,
+    version: 6,
     exportedAt: new Date().toISOString(),
-    visits, areas, equipment
+    visits, areas, equipment: slimEq, photos
   };
   const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
   const a = document.createElement('a');
@@ -3047,7 +3352,21 @@ async function restoreBackup(file) {
     if (!confirm('Restore will add this backup data onto this device. Continue?')) return;
     for (const v of (data.visits || [])) await dbPut(STORE_VISITS, v);
     for (const a of (data.areas || [])) await dbPut(STORE_AREAS, a);
-    for (const e of (data.equipment || [])) await dbPut(STORE_EQUIPMENT, e);
+    for (const [id, dataUrl] of Object.entries(data.photos || {})) {
+      await dbPut(STORE_PHOTOS, { id, blob: dataUrlToBlob(dataUrl), mime: 'image/jpeg', createdAt: Date.now() });
+    }
+    for (const e of (data.equipment || [])) {
+      if (e.photos) {
+        for (const p of e.photos) {
+          if (p.dataUrl && !p.blobId) {
+            p.blobId = uuid();
+            await dbPut(STORE_PHOTOS, { id: p.blobId, blob: dataUrlToBlob(p.dataUrl), mime: 'image/jpeg', createdAt: Date.now() });
+            delete p.dataUrl;
+          }
+        }
+      }
+      await dbPut(STORE_EQUIPMENT, e);
+    }
     showToast('Backup restored');
     showView('view-visits');
   } catch (err) {
@@ -3069,6 +3388,7 @@ function initEvents() {
     renderCoach();
   });
   $('tile-add-eq')?.addEventListener('click', () => openNewEquipment(false));
+  $('btn-sticky-take')?.addEventListener('click', () => startFastTake(stickyNextShotId));
   $('tile-quick')?.addEventListener('click', openQuickCapture);
   $('tile-map')?.addEventListener('click', openMapView);
   $('tile-missing')?.addEventListener('click', openReadyCheck);
@@ -3080,7 +3400,10 @@ function initEvents() {
   });
   $('btn-highvis').addEventListener('click', toggleHighVis);
 
-  document.querySelectorAll('.modal-close').forEach(b => b.addEventListener('click', () => $('modal-visit').classList.add('hidden')));
+  document.querySelectorAll('.modal-close').forEach(b => b.addEventListener('click', () => {
+    pendingCameraAfterVisit = false;
+    $('modal-visit').classList.add('hidden');
+  }));
   document.querySelectorAll('.modal-close-area').forEach(b => b.addEventListener('click', () => $('modal-area').classList.add('hidden')));
   document.querySelectorAll('.modal-close-report').forEach(b => b.addEventListener('click', () => $('modal-report').classList.add('hidden')));
   document.querySelectorAll('.modal-close-qe').forEach(b => b.addEventListener('click', () => $('modal-quick-eq').classList.add('hidden')));
@@ -3204,6 +3527,8 @@ function initEvents() {
   $('btn-apply-clusters')?.addEventListener('click', applyClusters);
   $('btn-walk-seq')?.addEventListener('click', openWalkSequence);
   $('btn-export-package')?.addEventListener('click', exportVisitPackage);
+  $('btn-share-package')?.addEventListener('click', shareVisitPackage);
+  $('btn-walk-again')?.addEventListener('click', () => walkAgainFrom(currentVisitId));
   $('btn-backup')?.addEventListener('click', backupAllData);
   $('restore-input')?.addEventListener('change', (e) => {
     const f = e.target.files && e.target.files[0];
@@ -3240,6 +3565,7 @@ async function init() {
     const saved = localStorage.getItem('fieldvault_product_mode') === 'defense' ? 'defense' : 'commercial';
     applyProductMode(saved, { silent: true });
     restoreSession();
+    if (currentVisitId) latestVisitId = currentVisitId;
     showView('view-visits');
   } catch (err) {
     console.error(err);
@@ -3248,7 +3574,170 @@ async function init() {
 }
 
 export async function initFieldVault() {
+  await ensureFieldVaultLibs();
   await init();
+}
+
+async function demoPhotoBlob(label, color) {
+  return canvasJpegBlob((ctx, c) => {
+    ctx.fillStyle = color;
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.fillStyle = 'rgba(0,0,0,0.28)';
+    ctx.fillRect(0, 0, c.width, 88);
+    ctx.fillStyle = '#eef2f5';
+    ctx.font = '600 28px "IBM Plex Sans", system-ui, sans-serif';
+    ctx.fillText(label, 24, 52);
+    ctx.font = '16px "IBM Plex Sans", system-ui, sans-serif';
+    ctx.fillStyle = '#c5d0d8';
+    ctx.fillText('FieldVault demo frame', 24, 78);
+  });
+}
+
+async function demoPhoto(promptType, label, color, lat, lng) {
+  const blob = await demoPhotoBlob(label, color);
+  const blobId = await putPhotoBlob(blob, 'image/jpeg');
+  return {
+    id: uuid(),
+    blobId,
+    promptType,
+    note: '',
+    lat,
+    lng,
+    gpsAcc: 8,
+    source: 'demo',
+    capturedAt: Date.now()
+  };
+}
+
+export async function seedFieldVaultDemo() {
+  if (!db) await openDB();
+  const existing = await dbGetAll(STORE_VISITS);
+  if (existing.length) return false;
+
+  const now = Date.now();
+  const visitId = 'fv-demo-walkdown';
+  const areas = {
+    pumps: { id: 'fv-demo-area-pumps', visitId, name: 'Pump area', notes: 'Charge pumps at the crude unit.', createdAt: now, updatedAt: now },
+    vessels: { id: 'fv-demo-area-vessels', visitId, name: 'Vessels & exchangers', notes: 'Overhead drum and crude/resid exchanger.', createdAt: now, updatedAt: now },
+    rack: { id: 'fv-demo-area-rack', visitId, name: 'Pipe rack', notes: 'Battery-limit valves.', createdAt: now, updatedAt: now },
+    tanks: { id: 'fv-demo-area-tanks', visitId, name: 'Tank farm', notes: 'Suggested — no equipment tagged yet.', createdAt: now, updatedAt: now },
+    utils: { id: 'fv-demo-area-utils', visitId, name: 'Utilities', notes: 'Suggested — no equipment tagged yet.', createdAt: now, updatedAt: now }
+  };
+  const p101 = { lat: 29.7362, lng: -95.0128 };
+  const e210 = { lat: 29.7365, lng: -95.0134 };
+  const v301 = { lat: 29.7358, lng: -95.0131 };
+
+  await dbPut(STORE_VISITS, {
+    id: visitId,
+    title: 'Crude unit walkdown',
+    client: 'Gulf Coast Refining',
+    facility: 'Crude unit',
+    date: new Date().toISOString().slice(0, 10),
+    overallNotes: 'Sample visit. P-101 is nearly leave-ready. XV-402 still needs photos and a GPS pin.',
+    template: 'walkdown',
+    createdAt: now,
+    updatedAt: now
+  });
+  for (const area of Object.values(areas)) await dbPut(STORE_AREAS, area);
+
+  await dbPut(STORE_EQUIPMENT, {
+    id: 'fv-demo-eq-p101',
+    visitId,
+    areaId: areas.pumps.id,
+    tag: 'P-101',
+    eqType: 'pump',
+    locationDesc: 'Charge pump at the crude unit inlet',
+    service: 'Crude charge',
+    pid: 'P&ID-CU-101',
+    mfr: 'Flowtec',
+    model: 'FT-80',
+    serial: 'A18422',
+    lat: p101.lat,
+    lng: p101.lng,
+    gpsAcc: 8,
+    condition: 'Fair',
+    priority: 'Medium',
+    notes: 'Slight stain at the seal. Nameplate readable.',
+    needsFollowup: false,
+    photos: [
+      await demoPhoto('overall', 'P-101 · overall', '#3d4f5c', p101.lat, p101.lng),
+      await demoPhoto('tag', 'P-101 · nameplate', '#2c3a44', p101.lat, p101.lng),
+      await demoPhoto('coupling', 'P-101 · coupling', '#4a5d4a', p101.lat, p101.lng),
+      await demoPhoto('seal', 'P-101 · seal', '#5c4a3d', p101.lat, p101.lng)
+    ],
+    createdAt: now,
+    updatedAt: now
+  });
+  await dbPut(STORE_EQUIPMENT, {
+    id: 'fv-demo-eq-e210',
+    visitId,
+    areaId: areas.vessels.id,
+    tag: 'E-210',
+    eqType: 'exchanger',
+    locationDesc: 'Crude / resid exchanger, south bay',
+    service: 'Crude / resid',
+    pid: 'P&ID-CU-210',
+    lat: e210.lat,
+    lng: e210.lng,
+    gpsAcc: 10,
+    condition: 'Good',
+    priority: 'Low',
+    notes: 'Wide and nameplate in. Detail shots still open.',
+    needsFollowup: false,
+    photos: [
+      await demoPhoto('overall', 'E-210 · overall', '#3d4f5c', e210.lat, e210.lng),
+      await demoPhoto('tag', 'E-210 · nameplate', '#2c3a44', e210.lat, e210.lng)
+    ],
+    createdAt: now,
+    updatedAt: now
+  });
+  await dbPut(STORE_EQUIPMENT, {
+    id: 'fv-demo-eq-v301',
+    visitId,
+    areaId: areas.vessels.id,
+    tag: 'V-301',
+    eqType: 'vessel',
+    locationDesc: 'Overhead drum, west of the exchanger bay',
+    service: 'Crude overhead',
+    pid: 'P&ID-CU-301',
+    lat: v301.lat,
+    lng: v301.lng,
+    gpsAcc: 12,
+    condition: 'Poor',
+    priority: 'High',
+    recommendation: 'Follow-up on insulation and missing tag paint.',
+    notes: 'Wide shot only. Nameplate still missing.',
+    needsFollowup: true,
+    photos: [
+      await demoPhoto('overall', 'V-301 · overall', '#4a3d3d', v301.lat, v301.lng)
+    ],
+    createdAt: now,
+    updatedAt: now
+  });
+  await dbPut(STORE_EQUIPMENT, {
+    id: 'fv-demo-eq-xv402',
+    visitId,
+    areaId: areas.rack.id,
+    tag: 'XV-402',
+    eqType: 'valve',
+    locationDesc: 'Battery-limit block on the charge line',
+    service: 'Crude charge',
+    pid: 'P&ID-CU-101',
+    lat: null,
+    lng: null,
+    condition: '',
+    priority: 'Urgent',
+    notes: 'No photos or GPS yet — good place to show Take and pin.',
+    needsFollowup: true,
+    photos: [],
+    createdAt: now,
+    updatedAt: now
+  });
+
+  latestVisitId = visitId;
+  await renderVisitsList();
+  showToast('Sample crude-unit walkdown loaded');
+  return true;
 }
 
   

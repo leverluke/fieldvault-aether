@@ -6,7 +6,7 @@ import { useState } from "react";
 import { cn } from "@/lib/utils";
 
 const LINKS = [
-  { to: "/apps/fieldvault", label: "FieldVault" },
+  { to: "/apps/fieldvault/play", label: "FieldVault" },
   { to: "/apps/aether", label: "Aether" },
   { to: "/coming-soon", label: "Coming soon" },
 ] as const;

@@ -38,12 +38,9 @@
         <button type="button" id="btn-coach-dismiss" class="btn-primary">Got it</button>
       </div>
       <div id="mode-banner" class="mode-banner">
-        <div class="mode-switch" role="group" aria-label="Product mode">
-          <button type="button" id="btn-mode-commercial" class="mode-btn active">Commercial</button>
-          <button type="button" id="btn-mode-defense" class="mode-btn">Defense</button>
-        </div>
         <p id="mode-banner-text">Oil & gas field notes — photograph equipment, tag it, and leave with a client-ready package.</p>
       </div>
+      <div id="facility-home" class="facility-home hidden"></div>
       <div id="visits-empty" class="empty-state hidden">
         <div class="empty-icon" aria-hidden="true">
           <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>
@@ -85,8 +82,8 @@
           <span class="action-sub">See pins & what’s nearby</span>
         </button>
         <button type="button" class="action-tile" id="tile-missing">
-          <span class="action-title">What’s missing?</span>
-          <span class="action-sub">Check before you leave</span>
+          <span class="action-title">Punch list</span>
+          <span class="action-sub">Gaps, follow-ups, leave-ready</span>
         </button>
       </div>
       <div class="visit-tools">
@@ -112,7 +109,9 @@
       <div id="equipment-list" class="card-list"></div>
       <div class="detail-actions">
         <button id="btn-export-package" class="btn-primary">Export Package</button>
+        <button id="btn-share-package" class="btn-secondary">Share</button>
         <button id="btn-generate-pdf" class="btn-secondary">Generate Report</button>
+        <button id="btn-walk-again" class="btn-secondary">Walk again</button>
         <button id="btn-edit-visit" class="btn-secondary">Edit Visit</button>
         <button id="btn-delete-visit" class="btn-danger">Delete Visit</button>
       </div>
@@ -383,7 +382,7 @@
 
     <section id="view-ready-check" class="view">
       <div class="detail-header">
-        <h2 id="ready-check-title">What's missing?</h2>
+        <h2 id="ready-check-title">Punch list</h2>
         <p class="meta" id="ready-check-meta">Finish these before you leave the site so the office isn't chasing photos later.</p>
       </div>
       <div id="ready-list" class="card-list"></div>
@@ -406,7 +405,7 @@
         <button type="button" class="btn-icon" id="btn-more-close" aria-label="Close">×</button>
       </div>
       <button type="button" class="more-item" id="more-highvis">High visibility</button>
-      <button type="button" class="more-item" id="more-defense">Defense mode (advanced)</button>
+      <button type="button" class="more-item" id="more-defense">Defense / twin mode (advanced)</button>
       <button type="button" class="more-item" id="more-modeling">Modeling mode</button>
       <button type="button" class="more-item" id="more-backup">Backup data</button>
       <label for="restore-input" class="more-item">Restore backup</label>
@@ -420,7 +419,9 @@
       <div class="modal-body">
         <div class="form-section"><label id="visit-title-label">Visit Title <span class="required">*</span></label><input type="text" id="visit-title" enterkeyhint="done" autocomplete="off" placeholder="e.g. Crude unit walkdown – May 12"></div>
         <div class="form-section"><label>Client / Project</label><input type="text" id="visit-client" enterkeyhint="next" autocomplete="off" placeholder="Operator or project name"></div>
-        <div class="form-section"><label>Facility / unit</label><input type="text" id="visit-facility" enterkeyhint="next" autocomplete="off" placeholder="e.g. Bayou Refinery – Crude Unit"></div>
+        <div class="form-section"><label>Facility / unit</label><input type="text" id="visit-facility" enterkeyhint="next" autocomplete="off" placeholder="e.g. Bayou Refinery – Crude Unit">
+          <div id="facility-chips" class="chip-group facility-chips"></div>
+        </div>
         <div class="form-section"><label>Date</label><input type="date" id="visit-date"></div>
         <div class="form-section"><label id="visit-template-label">What kind of visit?</label>
           <div id="visit-kind-grid" class="kind-grid"></div>

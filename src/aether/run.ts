@@ -405,8 +405,8 @@ async function runVision(q: string, ctx: Ctx): Promise<Reply> {
     return { text: `Zip pack saved. Hash ${p.hash.slice(0, 12)}.`, ran: "see" };
   }
   if (/\bfieldvault walk|walkdown json\b/.test(q)) {
-    fieldVaultWalk();
-    return { text: "FieldVault walkdown JSON downloaded. Import it back in Eyes.", ran: "export" };
+    await fieldVaultWalk();
+    return { text: "FieldVault walkdown JSON downloaded from the visit database.", ran: "export" };
   }
 
   if (/\bjoin (room|mesh)\b/.test(q)) {

@@ -86,10 +86,11 @@ export const WORK: WorkItem[] = [
       },
       {
         title: "Offline capture",
-        body: "IndexedDB, compressed photos, a phone that still works when the radio dies.",
+        body: "IndexedDB blobs, HEIC + EXIF, nameplate OCR, a phone that still works when the radio dies.",
       },
     ],
-    cta: { label: "Open preview", href: "/apps/fieldvault" },
+    cta: { label: "Open walkdown", href: "/apps/fieldvault/play" },
+    playHref: "/apps/fieldvault/play",
   },
   {
     slug: "aether",
