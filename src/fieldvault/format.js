@@ -141,6 +141,27 @@ export function punchItems(items) {
   });
 }
 
+export function nearestByGps(items, lat, lng, maxM = 18) {
+  if (lat == null || lng == null) return null;
+  let best = null;
+  let bestD = Infinity;
+  for (const eq of items || []) {
+    if (eq.lat == null || eq.lng == null) continue;
+    const d = haversineM(lat, lng, eq.lat, eq.lng);
+    const acc = Math.max(Number(eq.gpsAcc) || 0, 0);
+    const limit = Math.max(maxM, acc * 1.1);
+    if (d <= limit && d < bestD) {
+      best = eq;
+      bestD = d;
+    }
+  }
+  return best ? { eq: best, dist: bestD } : null;
+}
+
+export function isUntitledTag(tag) {
+  return /^(pin|pump|valve|tank|other|untitled)\s*\d*$/i.test(String(tag || "").trim());
+}
+
 export function facilityKey(visit) {
   const client = String(visit?.client || "").trim();
   const facility = String(visit?.facility || "").trim();

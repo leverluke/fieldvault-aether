@@ -36,7 +36,9 @@ function FieldVaultPlay() {
       cancelled = true;
       html.classList.remove("fv-active");
       document.body.classList.remove("fv-active");
+      document.body.classList.remove("fv-cam-open");
       void import("@/fieldvault/wake").then((m) => m.releaseWalkWake());
+      void import("@/fieldvault/app.js").then((m) => m.closeFieldCameraUi?.());
     };
   }, []);
 

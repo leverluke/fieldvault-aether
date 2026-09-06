@@ -20,6 +20,13 @@ export function walkGeoJson(
   areas: unknown[],
 ): { type: "FeatureCollection"; features: unknown[] };
 export function punchItems<T>(items: T[]): T[];
+export function nearestByGps<T extends { lat?: number | null; lng?: number | null; gpsAcc?: number }>(
+  items: T[],
+  lat: number,
+  lng: number,
+  maxM?: number,
+): { eq: T; dist: number } | null;
+export function isUntitledTag(tag: string): boolean;
 export function facilityKey(visit: { client?: string; facility?: string }): string;
 export function uniqueFacilities(visits: Array<{ client?: string; facility?: string }>): Array<{
   client: string;

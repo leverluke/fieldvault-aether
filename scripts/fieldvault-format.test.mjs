@@ -11,6 +11,8 @@ import {
   uniqueFacilities,
   walkGeoJson,
   walkLine,
+  nearestByGps,
+  isUntitledTag,
 } from "../src/fieldvault/format.js";
 
 test("csvCell quotes commas and doubles inner quotes", () => {
@@ -74,6 +76,18 @@ test("import rows map GPS without the 0.002 sketch hack", () => {
   assert.equal(row.tag, "P-101");
   assert.equal(row.lat, 29.7);
   assert.equal(row.lng, -95.1);
+});
+
+test("nearestByGps picks the close tag and ignores far ones", () => {
+  const items = [
+    { id: "p", tag: "P-101", lat: 29.7362, lng: -95.0128, gpsAcc: 8 },
+    { id: "x", tag: "XV-402", lat: 29.74, lng: -95.02, gpsAcc: 8 },
+  ];
+  const hit = nearestByGps(items, 29.73621, -95.01281, 18);
+  assert.equal(hit?.eq.tag, "P-101");
+  assert.equal(nearestByGps(items, 29.75, -95.03, 18), null);
+  assert.equal(isUntitledTag("Pin 3"), true);
+  assert.equal(isUntitledTag("P-101"), false);
 });
 
 test("facilities and punch list helpers", () => {

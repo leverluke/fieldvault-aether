@@ -1,10 +1,11 @@
 // @ts-nocheck
 /* FieldVault v3 – Expanded local-first version */
 import { DB_NAME, DB_VERSION, STORE_AREAS, STORE_EQUIPMENT, STORE_PHOTOS, STORE_VISITS } from './schema.js';
-import { clusterByAccuracy, csvCell, uniqueFacilities, walkGeoJson, walkLine } from './format.js';
+import { clusterByAccuracy, csvCell, isUntitledTag, nearestByGps, uniqueFacilities, walkGeoJson, walkLine } from './format.js';
 import { blobToDataUrl, canvasJpegBlob, dataUrlToBlob, ingestPhotoFile } from './photos.ts';
 import { readNameplate } from './ocr-plate.ts';
 import { ensureFieldVaultLibs } from './libs.ts';
+import { grabFrame, startFieldCamera, stopFieldCamera } from './camera.ts';
 
 let db = null;
 let currentView = 'visits';
@@ -33,14 +34,20 @@ let productMode = 'commercial';
 let pendingCameraAfterVisit = false;
 let stickyNextShotId = null;
 let latestVisitId = null;
+let cameraOpen = false;
+let forceNewPin = false;
+let lastCapturedEqId = null;
+let sessionShotCount = 0;
+let showEmptyAreas = false;
+let camBusy = false;
 
 const COPY = {
   commercial: {
     modeName: 'Commercial',
     pill: 'O&G',
     banner: 'Oil & gas field notes — photograph equipment, tag it, and leave with a client-ready package.',
-    emptyTitle: 'Start your first site visit',
-    emptyBody: 'Walk the unit, snap photos of what you see, and FieldVault will help you organize them for the office.',
+    emptyTitle: 'Start walking',
+    emptyBody: 'Snap first. We start a visit, pin GPS, and you can name tags when you catch your breath.',
     emptyCta: 'Create First Visit',
     newVisitBtn: '+ Visit',
     completenessTitle: 'How complete is this visit?',
@@ -266,7 +273,7 @@ function applyProductMode(mode, opts) {
   setText('cluster-meta', c.clusterMeta);
   setText('global-photos-help', c.photosHelp);
   setText('optional-details-summary', isDefense() ? 'More details (optional)' : 'Condition, P&ID, nameplate (optional)');
-  renderCoach();
+  renderCoach(latestVisitId ? 1 : 0);
   renderEqTypeChips();
   if ($('shot-guide-list')) renderShotGuide(window.__fvCurrentPhotos || []);
 
@@ -335,18 +342,296 @@ function armCameraCapture(shotId) {
   cam.click();
 }
 
-function startFastTake(shotId) {
+async function ensureVisitForCapture() {
   restoreSession();
   if (!currentVisitId && latestVisitId) currentVisitId = latestVisitId;
-  if (!currentVisitId) {
-    pendingCameraAfterVisit = true;
-    openVisitModal(false);
-    return;
+  if (currentVisitId) {
+    const existing = await dbGet(STORE_VISITS, currentVisitId);
+    if (existing) return existing.id;
+    currentVisitId = null;
   }
+  const visits = await dbGetAll(STORE_VISITS);
+  visits.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  if (visits[0]) {
+    currentVisitId = visits[0].id;
+    latestVisitId = visits[0].id;
+    persistSession();
+    return currentVisitId;
+  }
+  const now = Date.now();
+  const date = new Date().toISOString().slice(0, 10);
+  const lastFac = uniqueFacilities(visits)[0];
+  const visit = {
+    id: uuid(),
+    title: 'Walk · ' + formatDate(date),
+    client: lastFac ? lastFac.client : '',
+    facility: lastFac ? lastFac.facility : '',
+    date,
+    overallNotes: '',
+    template: 'walkdown',
+    createdAt: now,
+    updatedAt: now
+  };
+  await dbPut(STORE_VISITS, visit);
+  currentVisitId = visit.id;
+  latestVisitId = visit.id;
+  persistSession();
+  return visit.id;
+}
+
+function startFastTake(shotId) {
+  void startRushCapture(shotId);
+}
+
+async function startRushCapture(shotId) {
+  setPendingShot(shotId || null);
+  const id = await ensureVisitForCapture();
+  if (!id) return;
   startGpsWatch();
   persistSession();
-  armCameraCapture(shotId || null);
-  reconcileEquipmentForVisit();
+  await reconcileEquipmentForVisit();
+  const opened = await openFieldCameraUi();
+  if (!opened) armCameraCapture(shotId || null);
+}
+
+function updateCamChrome() {
+  if ($('fv-cam-count')) $('fv-cam-count').textContent = String(sessionShotCount);
+  if ($('fv-cam-gps')) $('fv-cam-gps').textContent = lastFix ? gpsStatusText(lastFix) : 'GPS…';
+  if ($('fv-cam-hint')) {
+    $('fv-cam-hint').textContent = forceNewPin
+      ? 'Next snap starts a new pin.'
+      : 'Stand at the asset. Snap. Keep walking.';
+  }
+}
+
+async function openFieldCameraUi() {
+  const overlay = $('fv-camera');
+  const video = $('fv-cam-video');
+  if (!overlay || !video || !navigator.mediaDevices?.getUserMedia) return false;
+  try {
+    await startFieldCamera(video);
+  } catch (e) {
+    console.warn(e);
+    return false;
+  }
+  cameraOpen = true;
+  sessionShotCount = 0;
+  overlay.classList.remove('hidden');
+  overlay.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('fv-cam-open');
+  $('sticky-next')?.classList.add('hidden');
+  updateCamChrome();
+  updateCamAttach(currentEquipmentId ? 'Will add to the open tag' : 'GPS will pick the nearest pin');
+  return true;
+}
+
+export function closeFieldCameraUi() {
+  cameraOpen = false;
+  forceNewPin = false;
+  camBusy = false;
+  stopFieldCamera();
+  const overlay = $('fv-camera');
+  overlay?.classList.add('hidden');
+  overlay?.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('fv-cam-open');
+  const video = $('fv-cam-video');
+  if (video) video.srcObject = null;
+  renderStickyNext(window.__fvCurrentPhotos || []);
+}
+
+function updateCamAttach(text) {
+  if ($('fv-cam-attach')) $('fv-cam-attach').textContent = text || '';
+}
+
+function buzz() {
+  try { navigator.vibrate?.(18); } catch (e) {}
+}
+
+async function shutterFieldCamera() {
+  if (!cameraOpen || camBusy) return;
+  const video = $('fv-cam-video');
+  if (!video) return;
+  camBusy = true;
+  try {
+    buzz();
+    showToast('Saving…');
+    const file = await grabFrame(video);
+    const shot = await ingestPhotoFile(file);
+    const result = await smartAttachPhoto(shot);
+    sessionShotCount += 1;
+    updateCamChrome();
+    if (result) {
+      lastCapturedEqId = result.eq.id;
+      currentEquipmentId = result.eq.id;
+      persistSession();
+      updateCamAttach(result.message);
+      showToast(result.message);
+    }
+  } catch (err) {
+    console.error(err);
+    showToast('Photo did not save. Try again.');
+  } finally {
+    camBusy = false;
+  }
+}
+
+function nextPinName(items) {
+  const used = new Set((items || []).map((e) => String(e.tag || '').trim().toLowerCase()));
+  let n = 1;
+  while (used.has('pin ' + n)) n += 1;
+  return 'Pin ' + n;
+}
+
+async function createUntitledPin(fix) {
+  const items = currentVisitId ? await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId) : [];
+  const now = Date.now();
+  const eq = {
+    id: uuid(),
+    visitId: currentVisitId,
+    areaId: null,
+    tag: nextPinName(items),
+    eqType: 'other',
+    locationDesc: '',
+    lat: fix?.lat ?? null,
+    lng: fix?.lng ?? null,
+    gpsAcc: fix?.acc,
+    notes: '',
+    photos: [],
+    needsFollowup: false,
+    createdAt: now,
+    updatedAt: now
+  };
+  await dbPut(STORE_EQUIPMENT, eq);
+  return eq;
+}
+
+async function resolveAttachTarget(fix) {
+  if (currentVisitId && currentEquipmentId && !forceNewPin) {
+    const cur = await dbGet(STORE_EQUIPMENT, currentEquipmentId);
+    if (cur && cur.visitId === currentVisitId) return { eq: cur, how: 'current' };
+  }
+  const items = currentVisitId ? await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId) : [];
+  if (!forceNewPin && fix && fix.lat != null && fix.lng != null) {
+    const maxM = Math.max(18, Number(fix.acc) * 1.1 || 18);
+    const near = nearestByGps(items, fix.lat, fix.lng, maxM);
+    if (near) return { eq: near.eq, how: 'near', dist: near.dist };
+  }
+  forceNewPin = false;
+  return { eq: await createUntitledPin(fix), how: 'pin' };
+}
+
+async function addPhotoToEquipment(eq, shot) {
+  eq.photos = eq.photos || [];
+  const autoType = pendingShotType || nextMissingPromptType(eq.photos, eq.eqType || selectedEqType);
+  let blobId;
+  try {
+    blobId = await putPhotoBlob(shot.blob, shot.mime);
+  } catch (err) {
+    const smaller = await ingestPhotoFile(new File([shot.blob], 'photo.jpg', { type: 'image/jpeg' }), { quality: 0.52, maxDim: 1024 });
+    blobId = await putPhotoBlob(smaller.blob, smaller.mime);
+  }
+  const rec = {
+    id: uuid(),
+    blobId,
+    note: shot.dark ? 'Possibly dark' : '',
+    promptType: autoType,
+    lat: shot.exif?.lat ?? lastFix?.lat ?? null,
+    lng: shot.exif?.lng ?? lastFix?.lng ?? null,
+    gpsAcc: shot.exif?.acc ?? lastFix?.acc,
+    source: shot.exif ? 'exif' : (lastFix ? 'gps' : null),
+    capturedAt: Date.now()
+  };
+  eq.photos.push(rec);
+  if ((shot.exif || lastFix) && eq.lat == null) {
+    const fix = shot.exif || lastFix;
+    eq.lat = fix.lat;
+    eq.lng = fix.lng;
+    if (fix.acc) eq.gpsAcc = fix.acc;
+    applyFixToForm(fix);
+  }
+  eq.updatedAt = Date.now();
+  await dbPut(STORE_EQUIPMENT, eq);
+  if (autoType === 'tag') void applyNameplateOcr(eq.id, shot.blob);
+  return { rec, autoType };
+}
+
+async function smartAttachPhoto(shot) {
+  if (!currentVisitId) {
+    showToast('Open a visit first, then take the photo.');
+    return null;
+  }
+  let fix = lastFix;
+  if (shot.exif?.lat != null) {
+    fix = { lat: shot.exif.lat, lng: shot.exif.lng, acc: shot.exif.acc || lastFix?.acc, at: Date.now() };
+  } else if (!fix) {
+    try { fix = await locate({ fresh: false, maxAge: 120000 }); } catch (e) { fix = lastFix; }
+  }
+  const target = await resolveAttachTarget(fix);
+  const { rec, autoType } = await addPhotoToEquipment(target.eq, shot);
+  setPendingShot(null);
+  persistSession();
+  attachGpsToLatestPhotos(target.eq.id, 1);
+  lastCapturedEqId = target.eq.id;
+  currentEquipmentId = target.eq.id;
+  if (currentView === 'view-equipment-detail' && !cameraOpen) {
+    const fresh = await dbGet(STORE_EQUIPMENT, target.eq.id);
+    if (fresh) {
+      await renderPhotos(fresh.photos);
+      updatePromptChecks(fresh.photos);
+      if ($('photo-count-badge')) {
+        $('photo-count-badge').textContent = String(fresh.photos.length);
+        $('photo-count-badge').className = 'badge ' + (fresh.photos.length < 2 ? 'warn' : 'ok');
+      }
+      renderStickyNext(fresh.photos);
+    }
+  } else if (currentView === 'view-visit-detail' && currentVisitId && !cameraOpen) {
+    loadVisitDetail(currentVisitId);
+  }
+  const meters = target.dist != null ? Math.round(target.dist) : null;
+  let message;
+  if (target.how === 'pin') message = target.eq.tag + ' · tap Name when you can';
+  else if (target.how === 'near') message = 'Added to ' + target.eq.tag + (meters != null ? ' · ' + meters + ' m' : '');
+  else message = 'Added to ' + target.eq.tag;
+  const shotName = autoType ? shotLabel(autoType, target.eq.eqType) : 'Photo';
+  return { eq: target.eq, rec, message: message + ' · ' + shotName };
+}
+
+function openNamePinModal() {
+  const id = lastCapturedEqId || currentEquipmentId;
+  if (!id) { showToast('Snap first, then name the pin'); return; }
+  dbGet(STORE_EQUIPMENT, id).then((eq) => {
+    if (!eq) { showToast('No pin to name'); return; }
+    if ($('name-pin-tag')) $('name-pin-tag').value = isUntitledTag(eq.tag) ? '' : (eq.tag || '');
+    if ($('name-pin-meta')) {
+      $('name-pin-meta').textContent = isUntitledTag(eq.tag)
+        ? (eq.tag + ' is untitled. Type the plant tag or say it.')
+        : ('Rename ' + (eq.tag || 'this pin') + '.');
+    }
+    $('modal-name-pin')?.classList.remove('hidden');
+    setTimeout(() => $('name-pin-tag')?.focus(), 80);
+  });
+}
+
+async function saveNamePin() {
+  const id = lastCapturedEqId || currentEquipmentId;
+  const tag = $('name-pin-tag')?.value.trim();
+  if (!id) { $('modal-name-pin')?.classList.add('hidden'); return; }
+  if (!tag) { showToast('Type a tag or skip'); return; }
+  const eq = await dbGet(STORE_EQUIPMENT, id);
+  if (!eq) return;
+  eq.tag = tag;
+  eq.updatedAt = Date.now();
+  await dbPut(STORE_EQUIPMENT, eq);
+  currentEquipmentId = eq.id;
+  persistSession();
+  $('modal-name-pin')?.classList.add('hidden');
+  updateCamAttach('Adding to ' + eq.tag);
+  showToast('Named ' + eq.tag);
+  if (currentView === 'view-visit-detail') loadVisitDetail(currentVisitId);
+  if (currentView === 'view-equipment-detail' && $('eq-tag')) {
+    $('eq-tag').value = eq.tag;
+    if ($('header-title')) $('header-title').textContent = eq.tag;
+  }
 }
 
 async function reconcileEquipmentForVisit() {
@@ -662,12 +947,12 @@ function renderEqTypeFilter(items) {
     });
   });
 }
-function renderCoach() {
+function renderCoach(visitCount) {
   const el = $('coach-card');
   if (!el) return;
   let dismissed = false;
   try { dismissed = localStorage.getItem('fieldvault_coach') === '1'; } catch (e) {}
-  el.classList.toggle('hidden', dismissed || isDefense());
+  el.classList.toggle('hidden', dismissed || isDefense() || visitCount > 0);
 }
 
 const KIND_CARDS = [
@@ -699,7 +984,7 @@ function renderKindCards(selected) {
 function renderStickyNext(photos) {
   const bar = $('sticky-next');
   if (!bar) return;
-  if (currentView === 'view-markup') {
+  if (cameraOpen || currentView === 'view-markup') {
     bar.classList.add('hidden');
     document.body.classList.remove('has-sticky-next');
     stickyNextShotId = null;
@@ -715,11 +1000,11 @@ function renderStickyNext(photos) {
   const copyEl = $('sticky-next-copy');
   if (copyEl) {
     if (!currentVisitId && !latestVisitId) {
-      copyEl.innerHTML = '<strong>Take</strong> Title once, then camera + GPS';
+      copyEl.innerHTML = '<strong>Snap</strong> Starts a walk · camera + GPS';
     } else if (onEq && nxt) {
       copyEl.innerHTML = '<strong>Next photo</strong> ' + escapeHtml(nxt.label);
     } else {
-      copyEl.innerHTML = '<strong>Take</strong> Camera + GPS — no form';
+      copyEl.innerHTML = '<strong>Snap</strong> Camera + GPS · name later';
     }
   }
 }
@@ -1037,6 +1322,10 @@ function showView(viewId) {
 }
 
 function goBack() {
+  if (cameraOpen) {
+    closeFieldCameraUi();
+    return;
+  }
   if (currentView === 'view-markup') {
     showView('view-equipment-detail');
     loadEquipmentDetail(currentEquipmentId);
@@ -1255,9 +1544,14 @@ async function renderVisitsList(filter = '') {
     });
   }
 
+  renderCoach(visits.length);
+  renderRushHero(visits, equipment);
+
   if (filtered.length === 0) {
     listEl.innerHTML = '';
-    emptyEl.classList.remove('hidden');
+    emptyEl.classList.toggle('hidden', visits.length > 0 || !!filter);
+    renderStickyNext(window.__fvCurrentPhotos || []);
+    renderFacilityHome(visits, equipment);
     return;
   }
   emptyEl.classList.add('hidden');
@@ -1286,6 +1580,46 @@ async function renderVisitsList(filter = '') {
   });
   renderStickyNext(window.__fvCurrentPhotos || []);
   renderFacilityHome(visits, equipment);
+}
+
+function renderRushHero(visits, equipment) {
+  const hero = $('rush-hero');
+  if (!hero) return;
+  const latest = (visits || [])[0];
+  if (!latest) {
+    hero.classList.remove('hidden');
+    hero.innerHTML = `
+      <p class="rush-kicker">In the field</p>
+      <h2 class="rush-title">Snap first. Name later.</h2>
+      <p class="rush-sub">Camera stays open. GPS pins each shot. Organize when you can.</p>
+      <div class="rush-actions">
+        <button type="button" class="btn-primary btn-lg" id="rush-snap">Snap</button>
+      </div>`;
+    $('rush-snap')?.addEventListener('click', () => startFastTake());
+    return;
+  }
+  const items = (equipment || []).filter((e) => e.visitId === latest.id);
+  const unnamed = items.filter((e) => isUntitledTag(e.tag)).length;
+  hero.classList.remove('hidden');
+  hero.innerHTML = `
+    <p class="rush-kicker">Continue this walk</p>
+    <h2 class="rush-title">${escapeHtml(latest.title || 'Visit')}</h2>
+    <p class="rush-sub">${escapeHtml([latest.client, latest.facility].filter(Boolean).join(' · ') || 'On site')}${items.length ? ' · ' + items.length + ' tags' : ''}${unnamed ? ' · ' + unnamed + ' still untitled' : ''}</p>
+    <div class="rush-actions">
+      <button type="button" class="btn-primary btn-lg" id="rush-snap">Snap</button>
+      <button type="button" class="btn-secondary" id="rush-open">Open visit</button>
+    </div>`;
+  $('rush-snap')?.addEventListener('click', () => {
+    currentVisitId = latest.id;
+    persistSession();
+    startFastTake();
+  });
+  $('rush-open')?.addEventListener('click', () => {
+    currentVisitId = latest.id;
+    currentAreaId = null;
+    showView('view-visit-detail');
+    loadVisitDetail(latest.id);
+  });
 }
 
 function renderFacilityChips(visits) {
@@ -1370,7 +1704,7 @@ async function saveVisit() {
     if (armAfterCreate) {
       pendingCameraAfterVisit = false;
       startGpsWatch();
-      armCameraCapture();
+      void startRushCapture();
     }
   }
   await dbPut(STORE_VISITS, visit);
@@ -1457,22 +1791,40 @@ async function loadVisitDetail(id) {
   renderCompleteness(equipment);
 
   const areasList = $('areas-list');
+  const filledAreas = areas.filter((a) => equipment.some((e) => e.areaId === a.id));
+  const emptyAreas = areas.filter((a) => !equipment.some((e) => e.areaId === a.id));
+  const areasToShow = showEmptyAreas ? areas : filledAreas;
   if (areas.length === 0) {
     areasList.innerHTML = '<p style="color:var(--text-muted);font-size:0.9rem;padding:8px 0">No areas yet. Use + Area, or we can suggest groups from GPS after you pin equipment.</p>';
   } else {
-    areasList.innerHTML = areas.map(a => {
+    let html = areasToShow.map(a => {
       const count = equipment.filter(e => e.areaId === a.id).length;
       return `<div class="card" data-id="${a.id}">
         <div class="card-title">${escapeHtml(a.name)}</div>
         <div class="card-meta"><span>${count} equipment</span></div>
       </div>`;
     }).join('');
+    if (emptyAreas.length && !showEmptyAreas) {
+      html += `<p class="area-hidden-note">${emptyAreas.length} unused area${emptyAreas.length === 1 ? '' : 's'} hidden. <button type="button" class="btn-secondary btn-sm" id="btn-show-empty-areas">Show</button></p>`;
+    } else if (emptyAreas.length && showEmptyAreas) {
+      html += `<p class="area-hidden-note"><button type="button" class="btn-secondary btn-sm" id="btn-hide-empty-areas">Hide unused areas</button></p>`;
+    }
+    if (!html) html = '<p class="area-hidden-note">No equipment in an area yet.</p>';
+    areasList.innerHTML = html;
     areasList.querySelectorAll('.card').forEach(c => {
       c.addEventListener('click', () => {
         currentAreaId = c.dataset.id;
         showView('view-area-detail');
         loadAreaDetail(currentAreaId);
       });
+    });
+    $('btn-show-empty-areas')?.addEventListener('click', () => {
+      showEmptyAreas = true;
+      loadVisitDetail(id);
+    });
+    $('btn-hide-empty-areas')?.addEventListener('click', () => {
+      showEmptyAreas = false;
+      loadVisitDetail(id);
     });
   }
 
@@ -1481,11 +1833,11 @@ async function loadVisitDetail(id) {
   const eqList = $('equipment-list');
   if (equipment.length === 0) {
     eqList.innerHTML = `<div class="next-step-card">
-      <h3>Start with one piece of equipment</h3>
-      <p>Walk up to a pump, tank, valve, or pipe. Give it a name — or just take a photo. Start with a wide shot, then the nameplate.</p>
-      <button type="button" class="btn-primary" id="btn-empty-add-eq">Add equipment</button>
+      <h3>Snap as you walk</h3>
+      <p>Stand at the asset and tap Snap. We pin GPS. Name the tag later — or tap Name a tag if you already know it.</p>
+      <button type="button" class="btn-primary" id="btn-empty-snap">Snap</button>
     </div>`;
-    $('btn-empty-add-eq')?.addEventListener('click', () => openNewEquipment(false));
+    $('btn-empty-snap')?.addEventListener('click', () => startFastTake());
   } else if (!shown.length) {
     eqList.innerHTML = '<p style="color:var(--text-muted);font-size:0.9rem;padding:8px 0">No equipment in this filter.</p>';
   } else {
@@ -1516,6 +1868,7 @@ function eqCardHtml(eq, areas) {
       ${eq.condition ? `<span class="badge">${eq.condition}</span>` : ''}
     </div>
     <div class="card-meta">
+      ${isUntitledTag(eq.tag) ? '<span class="untitled-hint">Untitled · tap to name</span>' : ''}
       ${areaName ? `<span>${escapeHtml(areaName)}</span>` : ''}
       ${eq.service ? `<span>${escapeHtml(eq.service)}</span>` : ''}
       ${miss.length ? `<span>Still needs: ${escapeHtml(miss.map(s => s.label).join(', '))}</span>` : ''}
@@ -1895,8 +2248,8 @@ function gpsStatusText(fix) {
 }
 function updateGpsStatusUi() {
   const el = $('gps-status');
-  if (!el) return;
-  el.textContent = lastFix ? gpsStatusText(lastFix) : 'Tap GPS to capture this spot';
+  if (el) el.textContent = lastFix ? gpsStatusText(lastFix) : 'Tap GPS to capture this spot';
+  if ($('fv-cam-gps')) $('fv-cam-gps').textContent = lastFix ? gpsStatusText(lastFix) : 'GPS…';
 }
 function applyFixToForm(fix) {
   if (!fix) return;
@@ -2075,85 +2428,14 @@ async function handlePhotoSelect(e) {
   }
 
   restoreSession();
-
-  if (!currentVisitId) {
-    showToast('Open a visit first, then take the photo.');
-    return;
-  }
+  await ensureVisitForCapture();
 
   try {
-    if (!currentEquipmentId) {
-      await ensureEquipmentName();
-      if (!$('eq-tag')?.value.trim()) {
-        showToast('Give it a name first — a tag like P-101 or just “Charge pump”');
-        return;
-      }
-      await saveEquipment({ silent: true });
-    }
-
-    const eq = await dbGet(STORE_EQUIPMENT, currentEquipmentId);
-    if (!eq) {
-      showToast('Save this equipment, then take the photo again.');
-      return;
-    }
-
-    eq.photos = eq.photos || [];
-    const lockedShot = pendingShotType;
-    let lastType = null;
-    const newPhotos = [];
+    let last = null;
     for (const shot of ingested) {
-      const autoType = lockedShot || pendingShotType || nextMissingPromptType(eq.photos, eq.eqType || selectedEqType);
-      lastType = autoType;
-      let blobId;
-      try {
-        blobId = await putPhotoBlob(shot.blob, shot.mime);
-      } catch (err) {
-        const smaller = await ingestPhotoFile(new File([shot.blob], 'photo.jpg', { type: 'image/jpeg' }), { quality: 0.52, maxDim: 1024 });
-        blobId = await putPhotoBlob(smaller.blob, smaller.mime);
-      }
-      const rec = {
-        id: uuid(),
-        blobId,
-        note: shot.dark ? 'Possibly dark' : '',
-        promptType: autoType,
-        lat: shot.exif?.lat ?? null,
-        lng: shot.exif?.lng ?? null,
-        gpsAcc: shot.exif?.acc,
-        source: shot.exif ? 'exif' : null,
-        capturedAt: Date.now()
-      };
-      eq.photos.push(rec);
-      newPhotos.push({ rec, shot });
-      if (shot.exif && eq.lat == null) {
-        eq.lat = shot.exif.lat;
-        eq.lng = shot.exif.lng;
-        if (shot.exif.acc) eq.gpsAcc = shot.exif.acc;
-        applyFixToForm(shot.exif);
-      }
+      last = await smartAttachPhoto(shot);
     }
-    setPendingShot(null);
-    eq.updatedAt = Date.now();
-    await dbPut(STORE_EQUIPMENT, eq);
-
-    await renderPhotos(eq.photos);
-    updatePromptChecks(eq.photos);
-    if ($('photo-count-badge')) {
-      $('photo-count-badge').textContent = String(eq.photos.length);
-      $('photo-count-badge').className = 'badge ' + (eq.photos.length < 2 ? 'warn' : 'ok');
-    }
-    const shotName = lastType ? shotLabel(lastType, eq.eqType || selectedEqType) : 'Photo';
-    const taken = guidedTypes(eq.photos);
-    const nxt = shotsFor(eq.eqType || selectedEqType).find(s => !taken.has(s.id));
-    showToast(shotName + ' saved' + (nxt ? ' · Next: ' + nxt.label : ' · Listed shots done'));
-    persistSession();
-    attachGpsToLatestPhotos(eq.id, ingested.length);
-    const tagShot = newPhotos.find((x) => x.rec.promptType === 'tag');
-    if (tagShot) void applyNameplateOcr(eq.id, tagShot.shot.blob);
-    if (currentView === 'view-visit-detail' && currentVisitId) {
-      loadVisitDetail(currentVisitId);
-    } else {
-      renderStickyNext(eq.photos);
-    }
+    if (last) showToast(last.message);
   } catch (err) {
     console.error(err);
     showToast('Photo did not save. Try one more time.');
@@ -3385,11 +3667,38 @@ function initEvents() {
   $('btn-mode-defense')?.addEventListener('click', () => setProductMode('defense'));
   $('btn-coach-dismiss')?.addEventListener('click', () => {
     try { localStorage.setItem('fieldvault_coach', '1'); } catch (e) {}
-    renderCoach();
+    renderCoach(latestVisitId ? 1 : 0);
   });
   $('tile-add-eq')?.addEventListener('click', () => openNewEquipment(false));
   $('btn-sticky-take')?.addEventListener('click', () => startFastTake(stickyNextShotId));
   $('tile-quick')?.addEventListener('click', openQuickCapture);
+  $('fv-cam-done')?.addEventListener('click', () => {
+    closeFieldCameraUi();
+    if (currentVisitId) {
+      showView('view-visit-detail');
+      loadVisitDetail(currentVisitId);
+    }
+  });
+  $('fv-cam-shutter')?.addEventListener('click', () => void shutterFieldCamera());
+  $('fv-cam-name')?.addEventListener('click', openNamePinModal);
+  $('fv-cam-newpin')?.addEventListener('click', () => {
+    forceNewPin = true;
+    currentEquipmentId = null;
+    persistSession();
+    updateCamChrome();
+    updateCamAttach('Next snap starts a new pin');
+    showToast('Next snap is a new pin');
+  });
+  $('btn-name-pin-close')?.addEventListener('click', () => $('modal-name-pin')?.classList.add('hidden'));
+  $('btn-name-pin-skip')?.addEventListener('click', () => $('modal-name-pin')?.classList.add('hidden'));
+  $('btn-name-pin-save')?.addEventListener('click', () => void saveNamePin());
+  $('btn-voice-name-pin')?.addEventListener('click', function(){ startVoice('name-pin-tag', this); });
+  $('name-pin-tag')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void saveNamePin();
+    }
+  });
   $('tile-map')?.addEventListener('click', openMapView);
   $('tile-missing')?.addEventListener('click', openReadyCheck);
   $('btn-new-visit').addEventListener('click', () => openVisitModal(false));

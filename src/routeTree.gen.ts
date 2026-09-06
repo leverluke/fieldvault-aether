@@ -22,8 +22,8 @@ import { Route as AppsAetherCraftRouteImport } from './routes/apps/aether/craft'
 import { Route as AppsAetherSeeRouteImport } from './routes/apps/aether/see'
 import { Route as AppsAetherVerifyRouteImport } from './routes/apps/aether/verify'
 import { Route as AppsEmptyStretchPlayRouteImport } from './routes/apps/empty-stretch/play'
-import { Route as AppsLookoutPlayRouteImport } from './routes/apps/lookout/play'
 import { Route as AppsFieldvaultPlayRouteImport } from './routes/apps/fieldvault/play'
+import { Route as AppsLookoutPlayRouteImport } from './routes/apps/lookout/play'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -90,14 +90,14 @@ const AppsEmptyStretchPlayRoute = AppsEmptyStretchPlayRouteImport.update({
   path: '/apps/empty-stretch/play',
   getParentRoute: () => rootRouteImport,
 } as any)
-const AppsLookoutPlayRoute = AppsLookoutPlayRouteImport.update({
-  id: '/apps/lookout/play',
-  path: '/apps/lookout/play',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const AppsFieldvaultPlayRoute = AppsFieldvaultPlayRouteImport.update({
   id: '/apps/fieldvault/play',
   path: '/apps/fieldvault/play',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AppsLookoutPlayRoute = AppsLookoutPlayRouteImport.update({
+  id: '/apps/lookout/play',
+  path: '/apps/lookout/play',
   getParentRoute: () => rootRouteImport,
 } as any)
 
@@ -115,8 +115,8 @@ export interface FileRoutesByFullPath {
   '/apps/aether/see': typeof AppsAetherSeeRoute
   '/apps/aether/verify': typeof AppsAetherVerifyRoute
   '/apps/empty-stretch/play': typeof AppsEmptyStretchPlayRoute
-  '/apps/lookout/play': typeof AppsLookoutPlayRoute
   '/apps/fieldvault/play': typeof AppsFieldvaultPlayRoute
+  '/apps/lookout/play': typeof AppsLookoutPlayRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -132,8 +132,8 @@ export interface FileRoutesByTo {
   '/apps/aether/see': typeof AppsAetherSeeRoute
   '/apps/aether/verify': typeof AppsAetherVerifyRoute
   '/apps/empty-stretch/play': typeof AppsEmptyStretchPlayRoute
-  '/apps/lookout/play': typeof AppsLookoutPlayRoute
   '/apps/fieldvault/play': typeof AppsFieldvaultPlayRoute
+  '/apps/lookout/play': typeof AppsLookoutPlayRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -150,8 +150,8 @@ export interface FileRoutesById {
   '/apps/aether/see': typeof AppsAetherSeeRoute
   '/apps/aether/verify': typeof AppsAetherVerifyRoute
   '/apps/empty-stretch/play': typeof AppsEmptyStretchPlayRoute
-  '/apps/lookout/play': typeof AppsLookoutPlayRoute
   '/apps/fieldvault/play': typeof AppsFieldvaultPlayRoute
+  '/apps/lookout/play': typeof AppsLookoutPlayRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -169,8 +169,8 @@ export interface FileRouteTypes {
     | '/apps/aether/see'
     | '/apps/aether/verify'
     | '/apps/empty-stretch/play'
-    | '/apps/lookout/play'
     | '/apps/fieldvault/play'
+    | '/apps/lookout/play'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -186,8 +186,8 @@ export interface FileRouteTypes {
     | '/apps/aether/see'
     | '/apps/aether/verify'
     | '/apps/empty-stretch/play'
-    | '/apps/lookout/play'
     | '/apps/fieldvault/play'
+    | '/apps/lookout/play'
   id:
     | '__root__'
     | '/'
@@ -203,8 +203,8 @@ export interface FileRouteTypes {
     | '/apps/aether/see'
     | '/apps/aether/verify'
     | '/apps/empty-stretch/play'
-    | '/apps/lookout/play'
     | '/apps/fieldvault/play'
+    | '/apps/lookout/play'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -221,8 +221,8 @@ export interface RootRouteChildren {
   AppsAetherSeeRoute: typeof AppsAetherSeeRoute
   AppsAetherVerifyRoute: typeof AppsAetherVerifyRoute
   AppsEmptyStretchPlayRoute: typeof AppsEmptyStretchPlayRoute
-  AppsLookoutPlayRoute: typeof AppsLookoutPlayRoute
   AppsFieldvaultPlayRoute: typeof AppsFieldvaultPlayRoute
+  AppsLookoutPlayRoute: typeof AppsLookoutPlayRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -318,18 +318,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppsEmptyStretchPlayRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/apps/lookout/play': {
-      id: '/apps/lookout/play'
-      path: '/apps/lookout/play'
-      fullPath: '/apps/lookout/play'
-      preLoaderRoute: typeof AppsLookoutPlayRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/apps/fieldvault/play': {
       id: '/apps/fieldvault/play'
       path: '/apps/fieldvault/play'
       fullPath: '/apps/fieldvault/play'
       preLoaderRoute: typeof AppsFieldvaultPlayRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/apps/lookout/play': {
+      id: '/apps/lookout/play'
+      path: '/apps/lookout/play'
+      fullPath: '/apps/lookout/play'
+      preLoaderRoute: typeof AppsLookoutPlayRouteImport
       parentRoute: typeof rootRouteImport
     }
   }
@@ -349,8 +349,8 @@ const rootRouteChildren: RootRouteChildren = {
   AppsAetherSeeRoute: AppsAetherSeeRoute,
   AppsAetherVerifyRoute: AppsAetherVerifyRoute,
   AppsEmptyStretchPlayRoute: AppsEmptyStretchPlayRoute,
-  AppsLookoutPlayRoute: AppsLookoutPlayRoute,
   AppsFieldvaultPlayRoute: AppsFieldvaultPlayRoute,
+  AppsLookoutPlayRoute: AppsLookoutPlayRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
