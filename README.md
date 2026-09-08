@@ -50,3 +50,5 @@ src/vision       detector, tracker, Lookout, Craft
 src/components/site   studio pages + Aether mind
 public/models    optional YOLO shards
 ```
+
+Cloud Agent connectivity test: this line was added by a Cursor Cloud Agent and can be removed.
