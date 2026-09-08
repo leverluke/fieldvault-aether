@@ -1,0 +1,50 @@
+"use client";
+
+import { createFileRoute } from "@tanstack/react-router";
+import { useEffect } from "react";
+import markup from "@/fieldvault/markup.html?raw";
+import "@/fieldvault/fieldvault.css";
+
+export const Route = createFileRoute("/apps/fieldvault/play")({
+  component: FieldVaultPlay,
+});
+
+function FieldVaultPlay() {
+  useEffect(() => {
+    const html = document.documentElement;
+    html.classList.add("fv-active");
+    document.body.classList.add("fv-active");
+    let cancelled = false;
+    void (async () => {
+      const [{ ensureFieldVaultLibs }, { requestWalkWake, releaseWalkWake, bindWalkWake }, { initFieldVault, seedFieldVaultDemo }, { registerFieldVaultPwa, bindInstallCapture }] =
+        await Promise.all([
+          import("@/fieldvault/libs"),
+          import("@/fieldvault/wake"),
+          import("@/fieldvault/app.js"),
+          import("@/fieldvault/pwa"),
+        ]);
+      if (cancelled) return;
+      bindInstallCapture();
+      registerFieldVaultPwa();
+      await ensureFieldVaultLibs();
+      bindWalkWake();
+      await requestWalkWake();
+      await seedFieldVaultDemo();
+      if (cancelled) return;
+      await initFieldVault();
+      return () => {
+        void releaseWalkWake();
+      };
+    })();
+    return () => {
+      cancelled = true;
+      html.classList.remove("fv-active");
+      document.body.classList.remove("fv-active");
+      document.body.classList.remove("fv-cam-open");
+      void import("@/fieldvault/wake").then((m) => m.releaseWalkWake());
+      void import("@/fieldvault/app.js").then((m) => m.closeFieldCameraUi?.());
+    };
+  }, []);
+
+  return <div id="fv-root" dangerouslySetInnerHTML={{ __html: markup }} />;
+}

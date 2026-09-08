@@ -35,7 +35,7 @@ export const WORK: WorkItem[] = [
     title: "FieldVault",
     titleLines: ["Field", "Vault"],
     kicker: "Site capture",
-    dek: "Photograph the unit in a guided sequence, pin it to GPS, score the walk, and leave with a package the office can use.",
+    dek: "Snap the unit. Pin it on the map. Leave with one package the office can send.",
     status: "Live prototype",
     hero: "A phone-first notebook for facility documentation. FixPlot, WalkScore, and the deliverable pipeline live inside this preview — they are views of the same product.",
     summary:
@@ -86,10 +86,11 @@ export const WORK: WorkItem[] = [
       },
       {
         title: "Offline capture",
-        body: "IndexedDB, compressed photos, a phone that still works when the radio dies.",
+        body: "IndexedDB blobs, HEIC + EXIF, nameplate OCR, a phone that still works when the radio dies.",
       },
     ],
-    cta: { label: "Open preview", href: "/apps/fieldvault" },
+    cta: { label: "Open walkdown", href: "/apps/fieldvault/play" },
+    playHref: "/apps/fieldvault/play",
   },
   {
     slug: "aether",

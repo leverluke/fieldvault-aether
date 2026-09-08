@@ -1,11 +1,32 @@
 // @ts-nocheck
 /* FieldVault v3 – Expanded local-first version */
-/* FieldVault v3 – Expanded local-first version */
-const DB_NAME = 'FieldVaultDB';
-const DB_VERSION = 2;
-const STORE_VISITS = 'visits';
-const STORE_AREAS = 'areas';
-const STORE_EQUIPMENT = 'equipment';
+import { DB_NAME, DB_VERSION, STORE_AREAS, STORE_EQUIPMENT, STORE_PHOTOS, STORE_VISITS } from './schema.js';
+import {
+  attachPreviewText,
+  clusterByAccuracy,
+  compareEquipmentWalkOrder,
+  csvCell,
+  isUntitledTag,
+  hasDarkPhoto,
+  nextWalkGap,
+  officePassItems,
+  officePassReasons,
+  parseSpokenName,
+  rushShotType,
+  suggestAttachTarget,
+  uniqueFacilities,
+  walkGapText,
+  walkGeoJson,
+  walkLine
+} from './format.js';
+import { blobToDataUrl, canvasJpegBlob, dataUrlToBlob, ingestPhotoFile } from './photos.ts';
+import { readNameplate } from './ocr-plate.ts';
+import { ensureFieldVaultLibs } from './libs.ts';
+import { grabFrame, setTorch, startFieldCamera, stopFieldCamera, torchSupported } from './camera.ts';
+import { judgeBlob, isDuplicateHash } from './eyes.ts';
+import { prefetchWalkTiles } from './tiles.ts';
+import { canInstallPwa, promptInstallPwa } from './pwa.ts';
+import { handoffHtml, handoffLine, handoffQrUrl } from './handoff.ts';
 
 let db = null;
 let currentView = 'visits';
@@ -31,22 +52,41 @@ let lastAiResult = '';
 let aiPhotoTargetId = null;
 
 let productMode = 'commercial';
+let pendingCameraAfterVisit = false;
+let stickyNextShotId = null;
+let latestVisitId = null;
+let cameraOpen = false;
+let forceNewPin = false;
+let lastCapturedEqId = null;
+let sessionShotCount = 0;
+let showEmptyAreas = false;
+let camBusy = false;
+let cameraFallback = false;
+let sessionPinSeq = 0;
+let lastAttach = null;
+let gpsDenied = false;
+let returnWalkMode = false;
+let camListenOn = false;
+let torchOn = false;
+let headingDeg = null;
+let lastPhotoHash = null;
+let lastSpokenAt = 0;
 
 const COPY = {
   commercial: {
     modeName: 'Commercial',
     pill: 'O&G',
     banner: 'Oil & gas field notes — photograph equipment, tag it, and leave with a client-ready package.',
-    emptyTitle: 'Start your first site visit',
-    emptyBody: 'Walk the unit, snap photos of what you see, and FieldVault will help you organize them for the office.',
+    emptyTitle: 'Start walking',
+    emptyBody: 'Snap first. We start a visit, pin GPS, and you can name tags when you catch your breath.',
     emptyCta: 'Create First Visit',
     newVisitBtn: '+ Visit',
     completenessTitle: 'How complete is this visit?',
     readyBtn: "What's missing?",
     readyHeader: "What's missing?",
-    readyMeta: "Finish these before you leave the site so the office isn't chasing photos later.",
+    readyMeta: "Name untitled pins, retake dark shots, then leave with the package.",
     readyAllGood: "You're good to leave",
-    readyAllGoodBody: 'Required photos are in place. Generate the report when you are back.',
+    readyAllGoodBody: 'Required photos are in place. Leave site sends one client package.',
     readyBack: 'Back to Visit',
     photoPromptsTitle: 'Photos to take',
     photoPromptHelp: 'Tap Take on a row. Start with a wide shot and the nameplate — those two matter most.',
@@ -264,7 +304,7 @@ function applyProductMode(mode, opts) {
   setText('cluster-meta', c.clusterMeta);
   setText('global-photos-help', c.photosHelp);
   setText('optional-details-summary', isDefense() ? 'More details (optional)' : 'Condition, P&ID, nameplate (optional)');
-  renderCoach();
+  renderCoach(latestVisitId ? 1 : 0);
   renderEqTypeChips();
   if ($('shot-guide-list')) renderShotGuide(window.__fvCurrentPhotos || []);
 
@@ -303,7 +343,10 @@ function persistSession() {
       eqId: currentEquipmentId,
       shot: pendingShotType,
       eqType: selectedEqType,
-      view: currentView
+      view: currentView,
+      camera: cameraOpen,
+      lastAttach,
+      sessionPinSeq
     }));
   } catch (e) {}
 }
@@ -316,8 +359,33 @@ function restoreSession() {
     if (s.eqId && !currentEquipmentId) currentEquipmentId = s.eqId;
     if (s.shot && !pendingShotType) pendingShotType = s.shot;
     if (s.eqType) selectedEqType = s.eqType;
+    if (s.lastAttach) lastAttach = s.lastAttach;
+    if (Number(s.sessionPinSeq)) sessionPinSeq = Number(s.sessionPinSeq);
     return s;
   } catch (e) { return null; }
+}
+
+async function restoreLastPlace(session) {
+  const view = session && session.view;
+  const visitOk = currentVisitId && await dbGet(STORE_VISITS, currentVisitId).catch(() => null);
+  if (visitOk && view && view !== 'view-visits' && view !== 'visits') {
+    if (view === 'view-visit-detail') {
+      showView('view-visit-detail');
+      await loadVisitDetail(currentVisitId);
+    } else if (view === 'view-equipment-detail' && currentEquipmentId) {
+      showView('view-equipment-detail');
+      await loadEquipmentDetail(currentEquipmentId);
+    } else if (view === 'view-ready-check') {
+      await openReadyCheck();
+    } else {
+      showView('view-visits');
+    }
+  } else {
+    showView('view-visits');
+  }
+  if (session && session.camera && visitOk) {
+    await openFieldCameraUi();
+  }
 }
 function setPendingShot(id) {
   pendingShotType = id || null;
@@ -325,12 +393,606 @@ function setPendingShot(id) {
 }
 
 function armCameraCapture(shotId) {
-  setPendingShot(shotId || null);
+  startFastTake(shotId);
+}
+
+async function ensureVisitForCapture() {
+  restoreSession();
+  if (!currentVisitId && latestVisitId) currentVisitId = latestVisitId;
+  if (currentVisitId) {
+    const existing = await dbGet(STORE_VISITS, currentVisitId);
+    if (existing) return existing.id;
+    currentVisitId = null;
+  }
+  const visits = await dbGetAll(STORE_VISITS);
+  visits.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  if (visits[0]) {
+    currentVisitId = visits[0].id;
+    latestVisitId = visits[0].id;
+    persistSession();
+    return currentVisitId;
+  }
+  const now = Date.now();
+  const date = new Date().toISOString().slice(0, 10);
+  const lastFac = uniqueFacilities(visits)[0];
+  const visit = {
+    id: uuid(),
+    title: 'Walk · ' + formatDate(date),
+    client: lastFac ? lastFac.client : '',
+    facility: lastFac ? lastFac.facility : '',
+    date,
+    overallNotes: '',
+    template: 'walkdown',
+    createdAt: now,
+    updatedAt: now
+  };
+  await dbPut(STORE_VISITS, visit);
+  currentVisitId = visit.id;
+  latestVisitId = visit.id;
   persistSession();
-  const cam = $('photo-input-cam') || $('photo-input');
-  if (!cam) { showToast('Camera input missing'); return; }
-  try { cam.value = ''; } catch (e) {}
-  cam.click();
+  return visit.id;
+}
+
+function startFastTake(shotId) {
+  void startRushCapture(shotId);
+}
+
+async function startRushCapture(shotId) {
+  setPendingShot(shotId || null);
+  const id = await ensureVisitForCapture();
+  if (!id) return;
+  if (currentView !== 'view-equipment-detail' && !shotId) {
+    currentEquipmentId = null;
+    persistSession();
+  }
+  startGpsWatch();
+  persistSession();
+  await reconcileEquipmentForVisit();
+  const opened = await openFieldCameraUi();
+  if (!opened) armCameraCapture(shotId || null);
+}
+
+function updateCamChrome() {
+  if ($('fv-cam-count')) $('fv-cam-count').textContent = String(sessionShotCount);
+  if ($('fv-cam-gps')) {
+    $('fv-cam-gps').textContent = gpsDenied ? 'GPS blocked' : (lastFix ? gpsStatusText(lastFix) : 'GPS…');
+  }
+  const n = lastAttach?.photoCount;
+  if ($('fv-cam-hint')) {
+    if (forceNewPin) $('fv-cam-hint').textContent = 'Next snap starts a new pin.';
+    else if (n === 1) $('fv-cam-hint').textContent = 'Nameplate — fill the frame. Say the tag if you can.';
+    else if (cameraFallback) $('fv-cam-hint').textContent = 'No live camera here — shutter still pins GPS.';
+    else $('fv-cam-hint').textContent = 'Stand at the asset. Snap. Volume or space also shoots.';
+  }
+  const listen = $('fv-cam-listen');
+  if (listen) {
+    listen.classList.toggle('off', !camListenOn);
+    listen.textContent = camListenOn ? 'Listening for a tag…' : 'Say the tag — mic off on this device';
+  }
+  void refreshCamAttachPreview();
+}
+
+async function previewAttachSuggestion() {
+  const items = currentVisitId ? await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId) : [];
+  let lastPin = null;
+  if (lastAttach?.id) lastPin = items.find((e) => e.id === lastAttach.id) || lastAttach;
+  if (currentView === 'view-equipment-detail' && currentEquipmentId) {
+    lastPin = items.find((e) => e.id === currentEquipmentId) || lastPin;
+  }
+  return suggestAttachTarget({
+    items,
+    lat: lastFix?.lat ?? lastAttach?.lat,
+    lng: lastFix?.lng ?? lastAttach?.lng,
+    acc: lastFix?.acc ?? lastAttach?.acc,
+    forceNew: forceNewPin,
+    lastPin,
+    lastShotAt: lastAttach?.at,
+    lockCurrent: currentView === 'view-equipment-detail' && !!pendingShotType
+  });
+}
+
+async function refreshCamAttachPreview() {
+  if (!cameraOpen) return;
+  try {
+    const suggestion = await previewAttachSuggestion();
+    updateCamAttach(attachPreviewText(suggestion));
+  } catch (e) {}
+}
+
+async function openFieldCameraUi() {
+  const overlay = $('fv-camera');
+  const video = $('fv-cam-video');
+  if (!overlay || !video) return false;
+  cameraFallback = false;
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('no camera api');
+    await startFieldCamera(video);
+  } catch (e) {
+    console.warn(e);
+    cameraFallback = true;
+    stopFieldCamera();
+    video.srcObject = null;
+  }
+  cameraOpen = true;
+  sessionShotCount = 0;
+  torchOn = false;
+  overlay.classList.remove('hidden');
+  overlay.setAttribute('aria-hidden', 'false');
+  overlay.classList.toggle('fv-cam-fallback', cameraFallback);
+  document.body.classList.add('fv-cam-open');
+  $('sticky-next')?.classList.add('hidden');
+  const torchBtn = $('fv-cam-torch');
+  if (torchBtn) {
+    torchBtn.classList.toggle('hidden', cameraFallback || !torchSupported());
+    torchBtn.setAttribute('aria-pressed', 'false');
+  }
+  startCamListen();
+  updateCamChrome();
+  updateCamAttach(currentEquipmentId ? 'Will add to the open tag' : 'GPS will pick the nearest pin');
+  return true;
+}
+
+export function closeFieldCameraUi() {
+  cameraOpen = false;
+  forceNewPin = false;
+  camBusy = false;
+  cameraFallback = false;
+  torchOn = false;
+  stopCamListen();
+  void setTorch(false);
+  stopFieldCamera();
+  $('fv-camera')?.classList.remove('fv-cam-fallback');
+  const overlay = $('fv-camera');
+  overlay?.classList.add('hidden');
+  overlay?.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('fv-cam-open');
+  const video = $('fv-cam-video');
+  if (video) video.srcObject = null;
+  renderStickyNext(window.__fvCurrentPhotos || []);
+}
+
+function updateCamAttach(text) {
+  if ($('fv-cam-attach')) $('fv-cam-attach').textContent = text || '';
+}
+
+function startCamListen() {
+  camListenOn = false;
+  if (!recognition) initSpeech();
+  if (!recognition) {
+    updateCamChrome();
+    return;
+  }
+  currentVoiceTarget = null;
+  voiceTargetId = null;
+  camListenOn = true;
+  try { recognition.start(); } catch (e) {
+    camListenOn = false;
+  }
+  updateCamChrome();
+}
+
+function stopCamListen() {
+  camListenOn = false;
+  try { recognition?.stop(); } catch (e) {}
+}
+
+async function applySpokenPinName(name) {
+  const id = lastCapturedEqId || currentEquipmentId || lastAttach?.id;
+  if (!id || !name) return;
+  const eq = await dbGet(STORE_EQUIPMENT, id);
+  if (!eq) return;
+  eq.tag = name;
+  eq.updatedAt = Date.now();
+  await dbPut(STORE_EQUIPMENT, eq);
+  if (lastAttach) lastAttach.tag = name;
+  updateCamAttach('Named ' + name);
+  showToast('Named ' + name);
+}
+
+async function flagCameraIssue(kind) {
+  const id = lastCapturedEqId || currentEquipmentId || lastAttach?.id;
+  if (!id) { showToast('Snap first, then flag'); return; }
+  const eq = await dbGet(STORE_EQUIPMENT, id);
+  if (!eq) return;
+  const labels = { leak: 'Leak', notag: 'No tag', blocked: 'Blocked access' };
+  const label = labels[kind] || kind;
+  const extra = label + ' flagged in the field.';
+  eq.notes = (eq.notes ? eq.notes + ' ' : '') + extra;
+  if (kind === 'leak' || kind === 'blocked') eq.needsFollowup = true;
+  const last = (eq.photos || [])[eq.photos.length - 1];
+  if (last) last.note = (last.note ? last.note + '. ' : '') + extra;
+  eq.updatedAt = Date.now();
+  await dbPut(STORE_EQUIPMENT, eq);
+  document.querySelectorAll('.fv-cam-issue').forEach((b) => {
+    if (b.dataset.issue === kind) b.classList.add('on');
+  });
+  showToast(label + ' noted');
+}
+
+async function toggleTorch() {
+  if (!cameraOpen || cameraFallback) return;
+  torchOn = !torchOn;
+  const ok = await setTorch(torchOn);
+  if (!ok) {
+    torchOn = false;
+    showToast('Light not available on this camera');
+  }
+  $('fv-cam-torch')?.setAttribute('aria-pressed', torchOn ? 'true' : 'false');
+}
+
+function bindFieldShutterKeys() {
+  if (document.documentElement.dataset.fvShutter === '1') return;
+  document.documentElement.dataset.fvShutter = '1';
+  document.addEventListener('keydown', (e) => {
+    if (!cameraOpen) return;
+    const t = e.target;
+    if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
+    if (e.code === 'Space' || e.key === ' ' || e.key === 'AudioVolumeUp' || e.key === 'AudioVolumeDown' || e.key === 'VolumeUp' || e.key === 'VolumeDown') {
+      e.preventDefault();
+      void shutterFieldCamera();
+    }
+  }, { passive: false });
+}
+
+function headingLabel() {
+  if (headingDeg == null || !Number.isFinite(headingDeg)) return '';
+  const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+  return dirs[Math.round(headingDeg / 45) % 8] + ' ' + Math.round(headingDeg) + '°';
+}
+
+function bindCompass() {
+  if (typeof window === 'undefined' || window.__fvCompass) return;
+  window.__fvCompass = true;
+  const apply = (e) => {
+    const h = e.webkitCompassHeading != null ? e.webkitCompassHeading : (e.alpha != null ? (360 - e.alpha) : null);
+    if (h == null || !Number.isFinite(h)) return;
+    headingDeg = h;
+    const el = $('walk-hud-compass');
+    if (el) {
+      el.classList.remove('hidden');
+      el.textContent = 'Facing ' + headingLabel();
+    }
+    const rush = $('rush-compass');
+    if (rush) rush.textContent = headingLabel();
+  };
+  window.addEventListener('deviceorientationabsolute', apply, true);
+  window.addEventListener('deviceorientation', apply, true);
+}
+
+function plotMiniWalk(svg, items, fix, gap) {
+  if (!svg) return;
+  const pts = (items || []).filter((e) => e.lat != null && e.lng != null);
+  if (!pts.length && !fix) {
+    svg.innerHTML = '';
+    return;
+  }
+  const all = pts.concat(fix && fix.lat != null ? [{ lat: fix.lat, lng: fix.lng, _you: true }] : []);
+  const lats = all.map((p) => p.lat);
+  const lngs = all.map((p) => p.lng);
+  const minLat = Math.min(...lats);
+  const maxLat = Math.max(...lats);
+  const minLng = Math.min(...lngs);
+  const maxLng = Math.max(...lngs);
+  const pad = 10;
+  const w = 160;
+  const h = 100;
+  const dx = Math.max(0.00008, maxLng - minLng);
+  const dy = Math.max(0.00008, maxLat - minLat);
+  const xy = (p) => {
+    const x = pad + ((p.lng - minLng) / dx) * (w - pad * 2);
+    const y = pad + ((maxLat - p.lat) / dy) * (h - pad * 2);
+    return { x, y };
+  };
+  const path = walkLine(items);
+  let d = '';
+  path.forEach((p, i) => {
+    const c = xy(p);
+    d += (i ? 'L' : 'M') + c.x.toFixed(1) + ' ' + c.y.toFixed(1);
+  });
+  let dots = '';
+  for (const eq of pts) {
+    const c = xy(eq);
+    const gapId = gap?.eq && gap.eq.id;
+    const empty = !(eq.photos || []).length;
+    const fill = eq.id === gapId ? '#e07a5f' : empty ? '#d4a017' : '#8fb8c9';
+    dots += `<circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="${eq.id === gapId ? 5 : 3.2}" fill="${fill}"/>`;
+  }
+  if (fix && fix.lat != null) {
+    const c = xy(fix);
+    dots += `<circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="4.5" fill="#5ee0b5" stroke="#0c0f12" stroke-width="1.5"/>`;
+  }
+  svg.innerHTML = `<rect x="0" y="0" width="${w}" height="${h}" rx="8" fill="#12171b"/>` +
+    (d ? `<path d="${d}" fill="none" stroke="#8fb8c9" stroke-width="1.6"/>` : '') + dots;
+}
+
+async function annotatedVisitItems() {
+  if (!currentVisitId) return [];
+  const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
+  return items.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) }));
+}
+
+async function refreshWalkHud() {
+  const hud = $('walk-hud');
+  if (!hud) return;
+  if (!currentVisitId || currentView === 'view-visits') {
+    hud.classList.add('hidden');
+    return;
+  }
+  const items = await annotatedVisitItems();
+  if (!items.length) {
+    hud.classList.add('hidden');
+    return;
+  }
+  const gap = nextWalkGap(items, lastFix?.lat, lastFix?.lng);
+  hud.classList.remove('hidden');
+  if ($('walk-hud-text')) $('walk-hud-text').textContent = walkGapText(gap);
+  if ($('walk-hud-compass')) {
+    if (headingDeg != null) {
+      $('walk-hud-compass').classList.remove('hidden');
+      $('walk-hud-compass').textContent = 'Facing ' + headingLabel();
+    }
+  }
+  plotMiniWalk($('walk-mini-map'), items, lastFix, gap);
+  const mapHud = $('map-walk-hud');
+  if (mapHud && $('map-walk-hud-text')) {
+    mapHud.classList.toggle('hidden', !gap);
+    $('map-walk-hud-text').textContent = walkGapText(gap);
+  }
+  if (lastFix) void prefetchWalkTiles(lastFix.lat, lastFix.lng);
+}
+
+function buzz() {
+  try { navigator.vibrate?.(18); } catch (e) {}
+}
+
+async function shutterFieldCamera() {
+  if (!cameraOpen || camBusy) return;
+  const video = $('fv-cam-video');
+  if (!video) return;
+  camBusy = true;
+  try {
+    buzz();
+    showToast('Saving…');
+    let file;
+    if (cameraFallback || !video.videoWidth) {
+      const blob = await canvasJpegBlob((ctx, c) => {
+        ctx.fillStyle = '#1e252c';
+        ctx.fillRect(0, 0, c.width, c.height);
+        ctx.fillStyle = '#8fb8c9';
+        ctx.font = '600 36px "IBM Plex Sans", system-ui, sans-serif';
+        ctx.fillText('Field pin', 36, 80);
+        ctx.fillStyle = '#c5d0d8';
+        ctx.font = '22px "IBM Plex Sans", system-ui, sans-serif';
+        const gps = lastFix ? lastFix.lat.toFixed(5) + ', ' + lastFix.lng.toFixed(5) : 'GPS pending';
+        ctx.fillText(gps, 36, 120);
+        ctx.fillText(new Date().toLocaleTimeString(), 36, 152);
+      });
+      file = new File([blob], `fv-${Date.now()}.jpg`, { type: 'image/jpeg' });
+    } else {
+      file = await grabFrame(video);
+    }
+    const shot = await ingestPhotoFile(file);
+    const result = await smartAttachPhoto(shot);
+    sessionShotCount += 1;
+    updateCamChrome();
+    if (result) {
+      lastCapturedEqId = result.eq.id;
+      currentEquipmentId = result.eq.id;
+      persistSession();
+      updateCamAttach(result.message);
+      showToast(result.message);
+    }
+  } catch (err) {
+    console.error(err);
+    showToast('Photo did not save. Try again.');
+  } finally {
+    camBusy = false;
+  }
+}
+
+function nextPinName(items) {
+  let max = sessionPinSeq;
+  for (const e of items || []) {
+    const m = /^(?:pin|untitled)\s*(\d+)$/i.exec(String(e.tag || '').trim());
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  sessionPinSeq = max + 1;
+  return 'Pin ' + sessionPinSeq;
+}
+
+async function createUntitledPin(fix) {
+  const items = currentVisitId ? await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId) : [];
+  const now = Date.now();
+  const eq = {
+    id: uuid(),
+    visitId: currentVisitId,
+    areaId: null,
+    tag: nextPinName(items),
+    eqType: 'other',
+    locationDesc: '',
+    lat: fix?.lat ?? null,
+    lng: fix?.lng ?? null,
+    gpsAcc: fix?.acc,
+    notes: '',
+    photos: [],
+    needsFollowup: false,
+    createdAt: now,
+    updatedAt: now
+  };
+  await dbPut(STORE_EQUIPMENT, eq);
+  return eq;
+}
+
+async function resolveAttachTarget(fix) {
+  const suggestion = await previewAttachSuggestion();
+  if (suggestion.how === 'current' || suggestion.how === 'near') {
+    const id = suggestion.eq && suggestion.eq.id;
+    const eq = id ? await dbGet(STORE_EQUIPMENT, id) : null;
+    if (eq && eq.visitId === currentVisitId) {
+      forceNewPin = false;
+      return { eq, how: suggestion.how, dist: suggestion.dist, reason: suggestion.reason };
+    }
+  }
+  forceNewPin = false;
+  return { eq: await createUntitledPin(fix), how: 'pin', reason: suggestion.reason, moved: suggestion.moved };
+}
+
+async function addPhotoToEquipment(eq, shot) {
+  eq.photos = eq.photos || [];
+  const autoType = rushShotType(eq.photos, pendingShotType) || nextMissingPromptType(eq.photos, eq.eqType || selectedEqType);
+  let blobId;
+  try {
+    blobId = await putPhotoBlob(shot.blob, shot.mime);
+  } catch (err) {
+    if (isQuotaError(err)) throw err;
+    const smaller = await ingestPhotoFile(new File([shot.blob], 'photo.jpg', { type: 'image/jpeg' }), { quality: 0.52, maxDim: 1024 });
+    blobId = await putPhotoBlob(smaller.blob, smaller.mime);
+  }
+  let judge = null;
+  try { judge = await judgeBlob(shot.blob); } catch (e) { judge = null; }
+  const bits = [];
+  if (shot.dark || judge?.dark) bits.push('Possibly dark');
+  if (judge?.blur) bits.push('Blurry');
+  if (judge?.leakHint) bits.push('Possible leak / rust');
+  if (judge?.hash && isDuplicateHash(judge.hash, lastPhotoHash)) bits.push('Looks like a duplicate');
+  if (judge?.hash) lastPhotoHash = judge.hash;
+  const rec = {
+    id: uuid(),
+    blobId,
+    note: bits.join('. '),
+    promptType: autoType,
+    hash: judge?.hash || '',
+    lat: shot.exif?.lat ?? lastFix?.lat ?? null,
+    lng: shot.exif?.lng ?? lastFix?.lng ?? null,
+    gpsAcc: shot.exif?.acc ?? lastFix?.acc,
+    source: shot.exif ? 'exif' : (lastFix ? 'gps' : null),
+    capturedAt: Date.now()
+  };
+  eq.photos.push(rec);
+  if ((shot.exif || lastFix) && eq.lat == null) {
+    const fix = shot.exif || lastFix;
+    eq.lat = fix.lat;
+    eq.lng = fix.lng;
+    if (fix.acc) eq.gpsAcc = fix.acc;
+    applyFixToForm(fix);
+  }
+  eq.updatedAt = Date.now();
+  await dbPut(STORE_EQUIPMENT, eq);
+  if (autoType === 'tag' || (isUntitledTag(eq.tag) && eq.photos.length >= 2)) {
+    void applyNameplateOcr(eq.id, shot.blob);
+  }
+  return { rec, autoType };
+}
+
+async function smartAttachPhoto(shot) {
+  if (!currentVisitId) {
+    showToast('Open a visit first, then take the photo.');
+    return null;
+  }
+  let fix = lastFix;
+  if (shot.exif?.lat != null) {
+    fix = { lat: shot.exif.lat, lng: shot.exif.lng, acc: shot.exif.acc || lastFix?.acc, at: Date.now() };
+  } else if (!fix) {
+    try { fix = await locate({ fresh: false, maxAge: 120000 }); } catch (e) { fix = lastFix; }
+  }
+  const target = await resolveAttachTarget(fix);
+  const { rec, autoType } = await addPhotoToEquipment(target.eq, shot);
+  setPendingShot(null);
+  lastCapturedEqId = target.eq.id;
+  currentEquipmentId = target.eq.id;
+  lastAttach = {
+    id: target.eq.id,
+    lat: rec.lat ?? target.eq.lat ?? fix?.lat,
+    lng: rec.lng ?? target.eq.lng ?? fix?.lng,
+    acc: rec.gpsAcc ?? target.eq.gpsAcc ?? fix?.acc,
+    at: Date.now(),
+    photoCount: (target.eq.photos || []).length,
+    tag: target.eq.tag
+  };
+  persistSession();
+  attachGpsToLatestPhotos(target.eq.id, 1);
+  if (currentView === 'view-equipment-detail' && !cameraOpen) {
+    const fresh = await dbGet(STORE_EQUIPMENT, target.eq.id);
+    if (fresh) {
+      await renderPhotos(fresh.photos);
+      updatePromptChecks(fresh.photos);
+      if ($('photo-count-badge')) {
+        $('photo-count-badge').textContent = String(fresh.photos.length);
+        $('photo-count-badge').className = 'badge ' + (fresh.photos.length < 2 ? 'warn' : 'ok');
+      }
+      renderStickyNext(fresh.photos);
+    }
+  } else if (currentView === 'view-visit-detail' && currentVisitId && !cameraOpen) {
+    loadVisitDetail(currentVisitId);
+  }
+  const meters = target.dist != null ? Math.round(target.dist) : (target.moved != null ? Math.round(target.moved) : null);
+  let message;
+  if (target.how === 'pin') {
+    message = target.eq.tag + (target.reason === 'moved' && meters != null ? ' · moved ' + meters + ' m' : ' · tap Name when you can');
+  } else if (target.how === 'near') {
+    message = 'Added to ' + target.eq.tag + (meters != null ? ' · ' + meters + ' m' : '');
+  } else {
+    message = 'Added to ' + target.eq.tag;
+  }
+  const shotName = autoType ? shotLabel(autoType, target.eq.eqType) : 'Photo';
+  if (autoType === 'overall') message += ' · next: nameplate';
+  else message += ' · ' + shotName;
+  return { eq: target.eq, rec, message };
+}
+
+function openNamePinModal() {
+  const id = lastCapturedEqId || currentEquipmentId;
+  if (!id) { showToast('Snap first, then name the pin'); return; }
+  dbGet(STORE_EQUIPMENT, id).then((eq) => {
+    if (!eq) { showToast('No pin to name'); return; }
+    if ($('name-pin-tag')) $('name-pin-tag').value = isUntitledTag(eq.tag) ? '' : (eq.tag || '');
+    if ($('name-pin-meta')) {
+      $('name-pin-meta').textContent = isUntitledTag(eq.tag)
+        ? (eq.tag + ' is untitled. Type the plant tag or say it.')
+        : ('Rename ' + (eq.tag || 'this pin') + '.');
+    }
+    $('modal-name-pin')?.classList.remove('hidden');
+    setTimeout(() => $('name-pin-tag')?.focus(), 80);
+  });
+}
+
+async function saveNamePin() {
+  const id = lastCapturedEqId || currentEquipmentId;
+  const tag = $('name-pin-tag')?.value.trim();
+  if (!id) { $('modal-name-pin')?.classList.add('hidden'); return; }
+  if (!tag) { showToast('Type a tag or skip'); return; }
+  const eq = await dbGet(STORE_EQUIPMENT, id);
+  if (!eq) return;
+  eq.tag = tag;
+  eq.updatedAt = Date.now();
+  await dbPut(STORE_EQUIPMENT, eq);
+  currentEquipmentId = eq.id;
+  persistSession();
+  $('modal-name-pin')?.classList.add('hidden');
+  updateCamAttach('Adding to ' + eq.tag);
+  showToast('Named ' + eq.tag);
+  if (currentView === 'view-visit-detail') loadVisitDetail(currentVisitId);
+  if (currentView === 'view-ready-check') openReadyCheck();
+  if (currentView === 'view-walk-seq') openWalkSequence();
+  if (currentView === 'view-equipment-detail' && $('eq-tag')) {
+    $('eq-tag').value = eq.tag;
+    if ($('header-title')) $('header-title').textContent = eq.tag;
+  }
+}
+
+async function reconcileEquipmentForVisit() {
+  if (!currentEquipmentId || !currentVisitId) return;
+  try {
+    const eq = await dbGet(STORE_EQUIPMENT, currentEquipmentId);
+    if (!eq || eq.visitId !== currentVisitId) {
+      currentEquipmentId = null;
+      if ($('eq-tag')) $('eq-tag').value = '';
+      persistSession();
+    }
+  } catch (e) {
+    currentEquipmentId = null;
+    if ($('eq-tag')) $('eq-tag').value = '';
+  }
 }
 
 function shot(id, label, required, tip) {
@@ -551,8 +1213,9 @@ function populatePhotoTypeSelect() {
   ).join('');
   if (cur) sel.value = cur;
 }
-function renderShotGuide(photos) {
+async function renderShotGuide(photos) {
   window.__fvCurrentPhotos = photos || [];
+  await hydratePhotos(photos);
   const list = $('shot-guide-list');
   if (!list) return;
   const shots = shotsFor(selectedEqType);
@@ -586,7 +1249,7 @@ function renderShotGuide(photos) {
     const tip = (!ok && s.tip) ? `<div class="shot-tip">${escapeHtml(s.tip)}</div>` : '';
     const matches = (photos || []).filter(p => p.promptType === s.id);
     const thumb = matches.length
-      ? `<button type="button" class="shot-thumb" data-photoid="${matches[0].id}"><img src="${matches[0].dataUrl}" alt="">${matches.length>1?`<span class="shot-count">${matches.length}</span>`:''}</button>`
+      ? `<button type="button" class="shot-thumb" data-photoid="${matches[0].id}"><img src="${matches[0]._url || matches[0].dataUrl || ''}" alt="">${matches.length>1?`<span class="shot-count">${matches.length}</span>`:''}</button>`
       : `<span class="shot-thumb empty" aria-hidden="true"></span>`;
     return `<div class="shot-row ${ok?'done':''} ${needed?'needed':''}" data-shot="${s.id}">
       ${thumb}
@@ -597,7 +1260,7 @@ function renderShotGuide(photos) {
   list.querySelectorAll('.btn-shot-cam').forEach(b => {
     b.addEventListener('click', (ev) => {
       ev.preventDefault();
-      armCameraCapture(b.dataset.shot);
+      startFastTake(b.dataset.shot);
     });
   });
   list.querySelectorAll('.shot-thumb[data-photoid]').forEach(b => {
@@ -606,7 +1269,7 @@ function renderShotGuide(photos) {
       const p = (photos || []).find(x => x.id === id);
       if (!p) return;
       currentPhotoId = id;
-      openMarkup(p.dataUrl, p);
+      openMarkup(p._url || p.dataUrl, p);
     });
   });
   renderStickyNext(photos);
@@ -621,7 +1284,9 @@ function renderEqTypeFilter(items) {
   }
   const used = OG_TYPE_ORDER.filter(id => counts[id]);
   if (!used.length) { wrap.innerHTML = ''; return; }
+  const needN = officePassItems(items.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) }))).length;
   wrap.innerHTML = `<button type="button" class="chip ${eqTypeFilter==='all'?'active':''}" data-filter="all">All</button>` +
+    (needN ? `<button type="button" class="chip ${eqTypeFilter==='needs'?'active':''}" data-filter="needs">To finish ${needN}</button>` : '') +
     used.map(id => `<button type="button" class="chip ${eqTypeFilter===id?'active':''}" data-filter="${id}">${escapeHtml(OG_TYPES[id].label)} ${counts[id]}</button>`).join('');
   wrap.querySelectorAll('.chip').forEach(c => {
     c.addEventListener('click', () => {
@@ -630,12 +1295,12 @@ function renderEqTypeFilter(items) {
     });
   });
 }
-function renderCoach() {
+function renderCoach(visitCount) {
   const el = $('coach-card');
   if (!el) return;
   let dismissed = false;
   try { dismissed = localStorage.getItem('fieldvault_coach') === '1'; } catch (e) {}
-  el.classList.toggle('hidden', dismissed || isDefense());
+  el.classList.toggle('hidden', dismissed || isDefense() || visitCount > 0);
 }
 
 const KIND_CARDS = [
@@ -667,28 +1332,29 @@ function renderKindCards(selected) {
 function renderStickyNext(photos) {
   const bar = $('sticky-next');
   if (!bar) return;
-  const onEq = currentView === 'view-equipment-detail';
-  if (!onEq || isDefense()) {
+  if (cameraOpen || currentView === 'view-markup') {
     bar.classList.add('hidden');
     document.body.classList.remove('has-sticky-next');
+    stickyNextShotId = null;
     return;
   }
   const shots = shotsFor(selectedEqType);
   const taken = guidedTypes(photos);
   const nxt = shots.find(s => s.required && !taken.has(s.id)) || shots.find(s => !taken.has(s.id));
-  if (!nxt) {
-    bar.classList.add('hidden');
-    document.body.classList.remove('has-sticky-next');
-    return;
-  }
+  const onEq = currentView === 'view-equipment-detail';
+  stickyNextShotId = onEq && nxt ? nxt.id : null;
   bar.classList.remove('hidden');
   document.body.classList.add('has-sticky-next');
   const copyEl = $('sticky-next-copy');
-  if (copyEl) copyEl.innerHTML = '<strong>Next photo</strong> ' + escapeHtml(nxt.label);
-  const take = $('btn-sticky-take');
-  if (take) take.onclick = () => {
-    armCameraCapture(nxt.id);
-  };
+  if (copyEl) {
+    if (!currentVisitId && !latestVisitId) {
+      copyEl.innerHTML = '<strong>Snap</strong> Starts a walk · camera + GPS';
+    } else if (onEq && nxt) {
+      copyEl.innerHTML = '<strong>Next photo</strong> ' + escapeHtml(nxt.label);
+    } else {
+      copyEl.innerHTML = '<strong>Snap</strong> Camera + GPS · name later';
+    }
+  }
 }
 
 async function renderCrumbs() {
@@ -745,7 +1411,7 @@ async function renderEqPager() {
     return;
   }
   const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
-  items.sort((a,b) => (a.tag||'').localeCompare(b.tag||''));
+  items.sort(compareEquipmentWalkOrder);
   const idx = items.findIndex(e => e.id === currentEquipmentId);
   if (items.length < 2 || idx < 0) { bar.classList.add('hidden'); return; }
   bar.classList.remove('hidden');
@@ -844,6 +1510,9 @@ function openDB() {
         es.createIndex('visitId', 'visitId', { unique: false });
         es.createIndex('areaId', 'areaId', { unique: false });
       }
+      if (!database.objectStoreNames.contains(STORE_PHOTOS)) {
+        database.createObjectStore(STORE_PHOTOS, { keyPath: 'id' });
+      }
     };
     req.onsuccess = (e) => { db = e.target.result; resolve(db); };
     req.onerror = () => reject(req.error);
@@ -874,6 +1543,71 @@ function dbGetAll(store) {
     req.onerror = () => rej(req.error);
   });
 }
+function isQuotaError(err) {
+  return !!(err && (err.name === 'QuotaExceededError' || err.code === 22));
+}
+async function putPhotoBlob(blob, mime) {
+  const rec = { id: uuid(), blob, mime: mime || blob.type || 'image/jpeg', createdAt: Date.now() };
+  try {
+    await dbPut(STORE_PHOTOS, rec);
+  } catch (err) {
+    if (isQuotaError(err)) {
+      showToast('Phone storage is full. Export a visit, then delete old ones.');
+    }
+    throw err;
+  }
+  return rec.id;
+}
+
+async function photoSrc(p) {
+  if (!p) return '';
+  if (p._url) return p._url;
+  if (p.blobId) {
+    const rec = await dbGet(STORE_PHOTOS, p.blobId);
+    if (rec?.blob) {
+      p._url = URL.createObjectURL(rec.blob);
+      return p._url;
+    }
+  }
+  return p.dataUrl || '';
+}
+
+async function photoDataUrl(p) {
+  if (p?.dataUrl) return p.dataUrl;
+  if (p?.blobId) {
+    const rec = await dbGet(STORE_PHOTOS, p.blobId);
+    if (rec?.blob) return blobToDataUrl(rec.blob);
+  }
+  return '';
+}
+
+async function hydratePhotos(photos) {
+  for (const p of photos || []) {
+    if (!p._url) p._url = await photoSrc(p);
+  }
+  return photos || [];
+}
+
+async function migrateEquipmentPhotos(eq) {
+  if (!eq || !eq.photos) return eq;
+  let changed = false;
+  for (const p of eq.photos) {
+    if (p.dataUrl && !p.blobId) {
+      try {
+        const blob = dataUrlToBlob(p.dataUrl);
+        p.blobId = await putPhotoBlob(blob, 'image/jpeg');
+        delete p.dataUrl;
+        changed = true;
+      } catch (e) {}
+    }
+  }
+  if (changed) {
+    eq.updatedAt = Date.now();
+    await dbPut(STORE_EQUIPMENT, eq);
+  }
+  return eq;
+}
+
 function dbDelete(store, id) {
   return new Promise((res, rej) => {
     const tx = db.transaction(store, 'readwrite');
@@ -902,9 +1636,11 @@ function showView(viewId) {
   // Bottom nav: hide only on markup
   const hideNav = ['view-markup'];
   document.body.classList.toggle('hide-bottom-nav', hideNav.includes(viewId));
-  if (viewId !== 'view-equipment-detail') {
+  if (viewId === 'view-markup') {
     document.body.classList.remove('has-sticky-next');
     $('sticky-next')?.classList.add('hidden');
+  } else {
+    renderStickyNext(window.__fvCurrentPhotos || []);
   }
 
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
@@ -944,6 +1680,10 @@ function showView(viewId) {
 }
 
 function goBack() {
+  if (cameraOpen) {
+    closeFieldCameraUi();
+    return;
+  }
   if (currentView === 'view-markup') {
     showView('view-equipment-detail');
     loadEquipmentDetail(currentEquipmentId);
@@ -985,6 +1725,14 @@ function initSpeech() {
         if (e.results[i].isFinal) finalText += t;
         else interim += t;
       }
+      if (camListenOn && cameraOpen && !currentVoiceTarget) {
+        const spoken = parseSpokenName(finalText || interim);
+        if (spoken && Date.now() - lastSpokenAt > 1200) {
+          lastSpokenAt = Date.now();
+          void applySpokenPinName(spoken);
+        }
+        return;
+      }
       const el = currentVoiceTarget ? $(currentVoiceTarget) : (voiceTargetId ? $(voiceTargetId) : null);
       if (!el) return;
       if (!el.dataset.voiceBase) el.dataset.voiceBase = el.value || '';
@@ -995,9 +1743,18 @@ function initSpeech() {
     };
     recognition.onerror = (e) => {
       if (e.error === 'no-speech' || e.error === 'aborted') return;
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+        camListenOn = false;
+        updateCamChrome();
+        return;
+      }
       console.warn('Speech error', e.error);
     };
     recognition.onend = () => {
+      if (camListenOn && cameraOpen) {
+        try { recognition.start(); } catch (err) {}
+        return;
+      }
       if (mediaRecorder && mediaRecorder.state === 'recording') {
         try { recognition.start(); } catch (err) {}
       }
@@ -1148,6 +1905,7 @@ async function renderVisitsList(filter = '') {
   const equipment = await dbGetAll(STORE_EQUIPMENT);
   const areas = await dbGetAll(STORE_AREAS);
   visits.sort((a,b) => (b.updatedAt||0) - (a.updatedAt||0));
+  latestVisitId = visits[0] ? visits[0].id : null;
 
   const listEl = $('visits-list');
   const emptyEl = $('visits-empty');
@@ -1161,9 +1919,14 @@ async function renderVisitsList(filter = '') {
     });
   }
 
+  renderCoach(visits.length);
+  renderRushHero(visits, equipment);
+
   if (filtered.length === 0) {
     listEl.innerHTML = '';
-    emptyEl.classList.remove('hidden');
+    emptyEl.classList.toggle('hidden', visits.length > 0 || !!filter);
+    renderStickyNext(window.__fvCurrentPhotos || []);
+    renderFacilityHome(visits, equipment);
     return;
   }
   emptyEl.classList.add('hidden');
@@ -1190,6 +1953,92 @@ async function renderVisitsList(filter = '') {
       loadVisitDetail(currentVisitId);
     });
   });
+  renderStickyNext(window.__fvCurrentPhotos || []);
+  renderFacilityHome(visits, equipment);
+}
+
+function renderRushHero(visits, equipment) {
+  const hero = $('rush-hero');
+  if (!hero) return;
+  const latest = (visits || [])[0];
+  if (!latest) {
+    hero.classList.remove('hidden');
+    hero.innerHTML = `
+      <p class="rush-kicker">In the field</p>
+      <h2 class="rush-title">Snap first. Name later.</h2>
+      <p class="rush-sub">Camera stays open. GPS pins each shot. Organize when you can.</p>
+      <div class="rush-actions">
+        <button type="button" class="btn-primary btn-lg" id="rush-snap">Snap</button>
+      </div>`;
+    $('rush-snap')?.addEventListener('click', () => startFastTake());
+    return;
+  }
+  const items = (equipment || []).filter((e) => e.visitId === latest.id);
+  const unnamed = items.filter((e) => isUntitledTag(e.tag)).length;
+  const gap = nextWalkGap(items.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) })), lastFix?.lat, lastFix?.lng);
+  const gapLine = gap ? walkGapText(gap) : '';
+  hero.classList.remove('hidden');
+  hero.innerHTML = `
+    <p class="rush-kicker">Continue this walk</p>
+    <h2 class="rush-title">${escapeHtml(latest.title || 'Visit')}</h2>
+    <p class="rush-sub">${escapeHtml([latest.client, latest.facility].filter(Boolean).join(' · ') || 'On site')}${items.length ? ' · ' + items.length + ' tags' : ''}${unnamed ? ' · ' + unnamed + ' still untitled' : ''}</p>
+    ${gapLine ? `<p class="rush-sub" id="rush-gap">${escapeHtml(gapLine)}</p>` : ''}
+    <p class="rush-sub" id="rush-compass">${headingLabel() ? escapeHtml('Facing ' + headingLabel()) : ''}</p>
+    <div class="rush-actions">
+      <button type="button" class="btn-primary btn-lg" id="rush-snap">Snap</button>
+      <button type="button" class="btn-secondary" id="rush-open">Open visit</button>
+      <button type="button" class="btn-secondary" id="rush-map">Map the walk</button>
+    </div>`;
+  $('rush-snap')?.addEventListener('click', () => {
+    currentVisitId = latest.id;
+    persistSession();
+    startFastTake();
+  });
+  $('rush-open')?.addEventListener('click', () => {
+    currentVisitId = latest.id;
+    currentAreaId = null;
+    showView('view-visit-detail');
+    loadVisitDetail(latest.id);
+  });
+  $('rush-map')?.addEventListener('click', () => {
+    currentVisitId = latest.id;
+    persistSession();
+    openMapView();
+  });
+}
+
+function renderFacilityChips(visits) {
+  const wrap = $('facility-chips');
+  if (!wrap) return;
+  const facs = uniqueFacilities(visits || []);
+  if (!facs.length) { wrap.innerHTML = ''; return; }
+  wrap.innerHTML = facs.slice(0, 6).map((f) =>
+    `<button type="button" class="chip" data-client="${escapeHtml(f.client)}" data-facility="${escapeHtml(f.facility)}">${escapeHtml([f.client, f.facility].filter(Boolean).join(' · '))}</button>`
+  ).join('');
+  wrap.querySelectorAll('.chip').forEach((b) => {
+    b.addEventListener('click', () => {
+      if ($('visit-client')) $('visit-client').value = b.dataset.client || '';
+      if ($('visit-facility')) $('visit-facility').value = b.dataset.facility || '';
+    });
+  });
+}
+
+function renderFacilityHome(visits, equipment) {
+  const wrap = $('facility-home');
+  if (!wrap) return;
+  const facs = uniqueFacilities(visits || []);
+  if (!facs.length) { wrap.classList.add('hidden'); wrap.innerHTML = ''; return; }
+  wrap.classList.remove('hidden');
+  wrap.innerHTML = '<p class="help-text">Walk this site again</p>' + facs.slice(0, 4).map((f) => {
+    const prior = (visits || []).find((v) => (v.client || '') === f.client && (v.facility || '') === f.facility);
+    const n = (equipment || []).filter((e) => e.visitId === (prior && prior.id)).length;
+    return `<button type="button" class="btn-secondary" data-visit="${prior ? prior.id : ''}">${escapeHtml([f.client, f.facility].filter(Boolean).join(' · '))}${n ? ' · ' + n + ' tags' : ''}</button>`;
+  }).join(' ');
+  wrap.querySelectorAll('button[data-visit]').forEach((b) => {
+    b.addEventListener('click', () => {
+      if (b.dataset.visit) walkAgainFrom(b.dataset.visit);
+    });
+  });
 }
 
 function openVisitModal(edit=false) {
@@ -1204,6 +2053,7 @@ function openVisitModal(edit=false) {
     currentVisitId = null;
   }
   renderKindCards($('visit-template')?.value || 'walkdown');
+  dbGetAll(STORE_VISITS).then(renderFacilityChips).catch(() => {});
   $('modal-visit').classList.remove('hidden');
 }
 
@@ -1212,6 +2062,7 @@ async function saveVisit() {
   if (!title) { showToast('Title required'); return; }
   const now = Date.now();
   const creating = !currentVisitId;
+  const armAfterCreate = creating && pendingCameraAfterVisit;
   let visit;
   if (!creating) {
     visit = await dbGet(STORE_VISITS, currentVisitId);
@@ -1234,6 +2085,12 @@ async function saveVisit() {
       createdAt: now, updatedAt: now
     };
     currentVisitId = visit.id;
+    latestVisitId = visit.id;
+    if (armAfterCreate) {
+      pendingCameraAfterVisit = false;
+      startGpsWatch();
+      void startRushCapture();
+    }
   }
   await dbPut(STORE_VISITS, visit);
   if (creating) await seedTemplateAreas(visit);
@@ -1241,6 +2098,68 @@ async function saveVisit() {
   showToast(creating ? 'Visit saved. Suggested plant areas are listed — add equipment as you walk.' : 'Visit saved');
   showView('view-visit-detail');
   loadVisitDetail(currentVisitId);
+}
+
+async function walkAgainFrom(visitId) {
+  const src = await dbGet(STORE_VISITS, visitId || currentVisitId);
+  if (!src) { showToast('Open a visit first'); return; }
+  const now = Date.now();
+  const visit = {
+    id: uuid(),
+    title: (src.title || 'Visit') + ' (return)',
+    client: src.client || '',
+    facility: src.facility || '',
+    date: new Date().toISOString().slice(0, 10),
+    overallNotes: '',
+    template: src.template || 'walkdown',
+    parentVisitId: src.id,
+    createdAt: now,
+    updatedAt: now
+  };
+  await dbPut(STORE_VISITS, visit);
+  const areas = await dbGetByIndex(STORE_AREAS, 'visitId', src.id);
+  const areaMap = {};
+  for (const a of areas) {
+    const next = { ...a, id: uuid(), visitId: visit.id, createdAt: now, updatedAt: now };
+    areaMap[a.id] = next.id;
+    await dbPut(STORE_AREAS, next);
+  }
+  const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', src.id);
+  for (const eq of items) {
+    await dbPut(STORE_EQUIPMENT, {
+      id: uuid(),
+      visitId: visit.id,
+      areaId: eq.areaId ? areaMap[eq.areaId] || '' : '',
+      tag: eq.tag,
+      eqType: eq.eqType || 'other',
+      locationDesc: eq.locationDesc || '',
+      service: eq.service || '',
+      pid: eq.pid || '',
+      lineNo: eq.lineNo || '',
+      mfr: eq.mfr || '',
+      model: eq.model || '',
+      serial: eq.serial || '',
+      lat: eq.lat ?? null,
+      lng: eq.lng ?? null,
+      gpsAcc: eq.gpsAcc,
+      notes: '',
+      photos: [],
+      needsFollowup: false,
+      createdAt: now,
+      updatedAt: now
+    });
+  }
+  currentVisitId = visit.id;
+  latestVisitId = visit.id;
+  persistSession();
+  returnWalkMode = true;
+  const cloned = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', visit.id);
+  const gap = nextWalkGap(cloned, lastFix?.lat, lastFix?.lng);
+  showToast(walkGapText(gap) || 'Return walk ready — same tags, empty photos');
+  showView('view-map');
+  $('header-title').textContent = 'Walk again';
+  await initMap();
+  refreshNearest();
 }
 
 async function loadVisitDetail(id) {
@@ -1258,21 +2177,32 @@ async function loadVisitDetail(id) {
   const areas = await dbGetByIndex(STORE_AREAS, 'visitId', id);
   const equipment = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', id);
   areas.sort((a,b) => (a.name||'').localeCompare(b.name||''));
-  equipment.sort((a,b) => (a.tag||'').localeCompare(b.tag||''));
+  equipment.sort(compareEquipmentWalkOrder);
 
   renderCompleteness(equipment);
+  void refreshWalkHud();
 
   const areasList = $('areas-list');
+  const filledAreas = areas.filter((a) => equipment.some((e) => e.areaId === a.id));
+  const emptyAreas = areas.filter((a) => !equipment.some((e) => e.areaId === a.id));
+  const areasToShow = showEmptyAreas ? areas : filledAreas;
   if (areas.length === 0) {
     areasList.innerHTML = '<p style="color:var(--text-muted);font-size:0.9rem;padding:8px 0">No areas yet. Use + Area, or we can suggest groups from GPS after you pin equipment.</p>';
   } else {
-    areasList.innerHTML = areas.map(a => {
+    let html = areasToShow.map(a => {
       const count = equipment.filter(e => e.areaId === a.id).length;
       return `<div class="card" data-id="${a.id}">
         <div class="card-title">${escapeHtml(a.name)}</div>
         <div class="card-meta"><span>${count} equipment</span></div>
       </div>`;
     }).join('');
+    if (emptyAreas.length && !showEmptyAreas) {
+      html += `<p class="area-hidden-note">${emptyAreas.length} unused area${emptyAreas.length === 1 ? '' : 's'} hidden. <button type="button" class="btn-secondary btn-sm" id="btn-show-empty-areas">Show</button></p>`;
+    } else if (emptyAreas.length && showEmptyAreas) {
+      html += `<p class="area-hidden-note"><button type="button" class="btn-secondary btn-sm" id="btn-hide-empty-areas">Hide unused areas</button></p>`;
+    }
+    if (!html) html = '<p class="area-hidden-note">No equipment in an area yet.</p>';
+    areasList.innerHTML = html;
     areasList.querySelectorAll('.card').forEach(c => {
       c.addEventListener('click', () => {
         currentAreaId = c.dataset.id;
@@ -1280,18 +2210,31 @@ async function loadVisitDetail(id) {
         loadAreaDetail(currentAreaId);
       });
     });
+    $('btn-show-empty-areas')?.addEventListener('click', () => {
+      showEmptyAreas = true;
+      loadVisitDetail(id);
+    });
+    $('btn-hide-empty-areas')?.addEventListener('click', () => {
+      showEmptyAreas = false;
+      loadVisitDetail(id);
+    });
   }
 
   renderEqTypeFilter(equipment);
-  const shown = eqTypeFilter === 'all' ? equipment : equipment.filter(e => (e.eqType || 'other') === eqTypeFilter);
+  const forPass = equipment.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) }));
+  const shown = eqTypeFilter === 'all'
+    ? equipment
+    : eqTypeFilter === 'needs'
+      ? officePassItems(forPass)
+      : equipment.filter(e => (e.eqType || 'other') === eqTypeFilter);
   const eqList = $('equipment-list');
   if (equipment.length === 0) {
     eqList.innerHTML = `<div class="next-step-card">
-      <h3>Start with one piece of equipment</h3>
-      <p>Walk up to a pump, tank, valve, or pipe. Give it a name — or just take a photo. Start with a wide shot, then the nameplate.</p>
-      <button type="button" class="btn-primary" id="btn-empty-add-eq">Add equipment</button>
+      <h3>Snap as you walk</h3>
+      <p>Stand at the asset and tap Snap. We pin GPS. Name the tag later — or tap Name a tag if you already know it.</p>
+      <button type="button" class="btn-primary" id="btn-empty-snap">Snap</button>
     </div>`;
-    $('btn-empty-add-eq')?.addEventListener('click', () => openNewEquipment(false));
+    $('btn-empty-snap')?.addEventListener('click', () => startFastTake());
   } else if (!shown.length) {
     eqList.innerHTML = '<p style="color:var(--text-muted);font-size:0.9rem;padding:8px 0">No equipment in this filter.</p>';
   } else {
@@ -1322,6 +2265,7 @@ function eqCardHtml(eq, areas) {
       ${eq.condition ? `<span class="badge">${eq.condition}</span>` : ''}
     </div>
     <div class="card-meta">
+      ${isUntitledTag(eq.tag) ? '<span class="untitled-hint">Untitled · tap to name</span>' : ''}
       ${areaName ? `<span>${escapeHtml(areaName)}</span>` : ''}
       ${eq.service ? `<span>${escapeHtml(eq.service)}</span>` : ''}
       ${miss.length ? `<span>Still needs: ${escapeHtml(miss.map(s => s.label).join(', '))}</span>` : ''}
@@ -1353,49 +2297,116 @@ function renderCompleteness(items) {
   if (items.length - withGuided > 0) warnings.push(c.missingGuided(items.length - withGuided));
   if (needsFollowup) warnings.push(needsFollowup + (isDefense() ? ' flagged for more reference photos' : ' flagged for follow-up'));
   if (items.length - withCoords > 0) warnings.push(c.missingGps(items.length - withCoords));
+  const untitled = items.filter((e) => isUntitledTag(e.tag)).length;
+  const dark = items.filter((e) => hasDarkPhoto(e)).length;
+  if (untitled) warnings.push(untitled + ' still need a name');
+  if (dark) warnings.push(dark + ' dark photo' + (dark === 1 ? '' : 's') + ' to retake');
   $('completeness-warnings').innerHTML = warnings.map(w => '<div>'+w+'</div>').join('');
 }
 
 async function openReadyCheck() {
   const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
   showView('view-ready-check');
-  $('header-title').textContent = isDefense() ? 'Processing Check' : "What's missing?";
+  $('header-title').textContent = isDefense() ? 'Processing Check' : 'Punch list';
   const list = $('ready-list');
   const c = copy();
-  const hard = items.filter(e => {
-    if (isDefense()) {
-      return !(e.photos||[]).length || e.needsFollowup || e.lat==null || !hasRequiredViews(e);
-    }
-    return !(e.photos||[]).length || e.needsFollowup || missingRequiredShots(e).length > 0;
-  });
-  const gpsOnly = items.filter(e => !hard.includes(e) && e.lat==null);
+  const annotated = items.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) }));
+  const hard = officePassItems(annotated);
   if (hard.length === 0) {
-    const gpsNote = gpsOnly.length
-      ? `<p>${gpsOnly.length} item${gpsOnly.length===1?'':'s'} have no map pin — optional, but useful if you want locations on the map.</p>`
-      : '';
-    list.innerHTML = `<div class="empty-state"><h2>${escapeHtml(c.readyAllGood)}</h2><p>${escapeHtml(c.readyAllGoodBody)}</p>${gpsNote}</div>`;
+    list.innerHTML = `<div class="empty-state"><h2>${escapeHtml(c.readyAllGood)}</h2><p>${escapeHtml(c.readyAllGoodBody)}</p>
+      <button type="button" class="btn-primary btn-lg" id="btn-leave-clean">Leave site — send to client</button></div>`;
+    $('btn-leave-clean')?.addEventListener('click', () => void leaveSite({ force: true }));
     return;
   }
   const cards = hard.map(eq => {
-    const issues = [];
+    const reasons = officePassReasons(eq);
+    const untitled = reasons.some((r) => r.id === 'untitled');
+    const dark = reasons.some((r) => r.id === 'dark' || r.id === 'blur' || r.id === 'dup');
     const miss = missingRequiredShots(eq);
-    if (!(eq.photos||[]).length) issues.push('No photos yet');
-    else if (miss.length) issues.push('Still needs: ' + miss.map(s => s.label).join(', '));
-    if (eq.needsFollowup) issues.push(isDefense() ? 'More reference photos needed' : 'Follow-up flagged');
-    if (isDefense() && eq.lat==null) issues.push('No GPS');
-    return `<div class="card danger-border" data-id="${eq.id}">
+    const retakeShot = dark ? (eq.photos || []).find((p) => /dark|blur|duplicate/i.test(p.note || ''))?.promptType || 'overall' : (miss[0] && miss[0].id) || '';
+    return `<div class="card danger-border punch-card" data-id="${eq.id}">
       <div class="card-title"><span class="tag-badge">${escapeHtml(eq.tag||'?')}</span></div>
-      <div class="card-meta">${issues.join(' · ')}</div>
+      <div class="card-meta">${reasons.map((r) => r.label).join(' · ')}</div>
+      ${untitled ? `<div class="punch-rename-row">
+        <input type="text" class="punch-rename" data-id="${eq.id}" placeholder="e.g. P-101" enterkeyhint="done">
+        <button type="button" class="btn-primary btn-sm punch-save-name" data-id="${eq.id}">Name</button>
+      </div>` : ''}
+      <div class="punch-actions">
+        ${retakeShot ? `<button type="button" class="btn-secondary btn-sm punch-retake" data-id="${eq.id}" data-shot="${retakeShot}">Retake</button>` : ''}
+        ${eq.needsFollowup ? `<button type="button" class="btn-secondary btn-sm punch-close" data-close="${eq.id}">Close follow-up</button>` : ''}
+      </div>
     </div>`;
   }).join('');
   list.innerHTML = cards;
+  list.querySelectorAll('.punch-save-name').forEach((b) => {
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      void savePunchName(b.dataset.id, list.querySelector('.punch-rename[data-id="' + b.dataset.id + '"]')?.value);
+    });
+  });
+  list.querySelectorAll('.punch-rename').forEach((inp) => {
+    inp.addEventListener('click', (ev) => ev.stopPropagation());
+    inp.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        void savePunchName(inp.dataset.id, inp.value);
+      }
+    });
+  });
+  list.querySelectorAll('.punch-retake').forEach((b) => {
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      currentEquipmentId = b.dataset.id;
+      lastCapturedEqId = b.dataset.id;
+      persistSession();
+      startFastTake(b.dataset.shot || null);
+    });
+  });
   list.querySelectorAll('.card').forEach(card => {
-    card.addEventListener('click', () => {
+    card.addEventListener('click', (ev) => {
+      if (ev.target.closest('button, input')) return;
       currentEquipmentId = card.dataset.id;
       showView('view-equipment-detail');
       loadEquipmentDetail(currentEquipmentId);
     });
   });
+  list.querySelectorAll('[data-close]').forEach((b) => {
+    b.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const eq = await dbGet(STORE_EQUIPMENT, b.dataset.close);
+      if (!eq) return;
+      eq.needsFollowup = false;
+      eq.updatedAt = Date.now();
+      await dbPut(STORE_EQUIPMENT, eq);
+      showToast('Follow-up closed');
+      openReadyCheck();
+    });
+  });
+}
+
+async function savePunchName(id, raw) {
+  const tag = String(raw || '').trim();
+  if (!id || !tag) { showToast('Type a tag'); return; }
+  const eq = await dbGet(STORE_EQUIPMENT, id);
+  if (!eq) return;
+  eq.tag = tag;
+  eq.updatedAt = Date.now();
+  await dbPut(STORE_EQUIPMENT, eq);
+  showToast('Named ' + tag);
+  openReadyCheck();
+}
+
+async function leaveSite(opts = {}) {
+  if (!currentVisitId) { showToast('Open a visit first'); return; }
+  const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
+  const annotated = items.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) }));
+  const open = officePassItems(annotated);
+  if (open.length && !(opts && opts.force)) {
+    showToast(open.length + ' still open — name or retake, then leave');
+    openReadyCheck();
+    return;
+  }
+  await exportVisitPackage({ share: true, client: true });
 }
 
 async function deleteVisit() {
@@ -1403,7 +2414,12 @@ async function deleteVisit() {
   const areas = await dbGetByIndex(STORE_AREAS, 'visitId', currentVisitId);
   const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
   for (const a of areas) await dbDelete(STORE_AREAS, a.id);
-  for (const e of items) await dbDelete(STORE_EQUIPMENT, e.id);
+  for (const e of items) {
+    for (const p of e.photos || []) {
+      if (p.blobId) await dbDelete(STORE_PHOTOS, p.blobId).catch(() => {});
+    }
+    await dbDelete(STORE_EQUIPMENT, e.id);
+  }
   await dbDelete(STORE_VISITS, currentVisitId);
   showToast('Visit deleted');
   showView('view-visits');
@@ -1547,7 +2563,9 @@ async function loadEquipmentDetail(id) {
   document.querySelectorAll('#priority-chips .chip').forEach(c => c.classList.toggle('active', c.dataset.value === selectedPriority));
   await populateAreaSelect(eq.areaId);
   $('btn-delete-equipment').classList.remove('hidden');
+  await migrateEquipmentPhotos(eq);
   const photos = eq.photos || [];
+  await hydratePhotos(photos);
   $('photo-count-badge').textContent = photos.length;
   $('photo-count-badge').className = 'badge ' + (photos.length===0?'danger':photos.length<2?'warn':'ok');
   renderPhotos(photos);
@@ -1563,15 +2581,16 @@ function updatePromptChecks(photos) {
   renderShotGuide(photos || []);
 }
 
-function renderPhotos(photos) {
+async function renderPhotos(photos) {
   const grid = $('photos-grid');
+  await hydratePhotos(photos);
   if (!photos.length) {
     grid.innerHTML = '<p style="color:var(--text-muted);font-size:0.9rem">No photos yet. Use the list above — tap Take on a shot.</p>';
     return;
   }
   grid.innerHTML = photos.map(p => `
     <div class="photo-thumb" data-id="${p.id}">
-      <img src="${p.dataUrl}" alt="">
+      <img src="${p._url || p.dataUrl || ''}" alt="">
       ${p.promptType ? `<div class="photo-type-badge">${escapeHtml(shotLabel(p.promptType, selectedEqType))}</div>` : ''}
       ${p.note ? `<div class="photo-note-badge">${escapeHtml(p.note)}</div>` : ''}
     </div>
@@ -1603,6 +2622,7 @@ async function saveEquipment(opts) {
   eq.locationDesc = $('eq-location').value.trim();
   eq.lat = parseFloat($('eq-lat').value) || null;
   eq.lng = parseFloat($('eq-lng').value) || null;
+  if (eq.lat != null && lastFix) eq.gpsAcc = lastFix.acc;
   eq.condition = selectedCondition || null;
   eq.priority = selectedPriority || null;
   eq.recommendation = $('eq-recommendation').value.trim();
@@ -1647,6 +2667,7 @@ function loadCachedFix() {
   } catch (e) {}
 }
 function saveFix(pos) {
+  gpsDenied = false;
   lastFix = {
     lat: pos.coords.latitude,
     lng: pos.coords.longitude,
@@ -1655,6 +2676,8 @@ function saveFix(pos) {
   };
   try { sessionStorage.setItem('fv_gps', JSON.stringify(lastFix)); } catch (e) {}
   updateGpsStatusUi();
+  if (cameraOpen) updateCamChrome();
+  void refreshWalkHud();
   return lastFix;
 }
 function gpsErrorMessage(err) {
@@ -1678,8 +2701,18 @@ function gpsStatusText(fix) {
 }
 function updateGpsStatusUi() {
   const el = $('gps-status');
+  if (el) el.textContent = lastFix ? gpsStatusText(lastFix) : 'Tap GPS to capture this spot';
+  if ($('fv-cam-gps')) {
+    $('fv-cam-gps').textContent = gpsDenied ? 'GPS blocked' : (lastFix ? gpsStatusText(lastFix) : 'GPS…');
+  }
+  renderGpsBanner();
+  if (cameraOpen) void refreshCamAttachPreview();
+}
+
+function renderGpsBanner() {
+  const el = $('fv-gps-banner');
   if (!el) return;
-  el.textContent = lastFix ? gpsStatusText(lastFix) : 'Tap GPS to capture this spot';
+  el.classList.toggle('hidden', !gpsDenied);
 }
 function applyFixToForm(fix) {
   if (!fix) return;
@@ -1721,7 +2754,11 @@ async function locate(opts = {}) {
     refine();
     return lastFix;
   } catch (e) {
-    if (e && e.code === 1) throw e;
+    if (e && e.code === 1) {
+      gpsDenied = true;
+      renderGpsBanner();
+      throw e;
+    }
   }
 
   try {
@@ -1732,6 +2769,10 @@ async function locate(opts = {}) {
     });
     return saveFix(pos);
   } catch (e) {
+    if (e && e.code === 1) {
+      gpsDenied = true;
+      renderGpsBanner();
+    }
     if (lastFix && Date.now() - lastFix.at < 15 * 60 * 1000) return lastFix;
     throw e;
   }
@@ -1741,7 +2782,13 @@ function startGpsWatch() {
   try {
     gpsWatchId = navigator.geolocation.watchPosition(
       pos => saveFix(pos),
-      () => {},
+      (err) => {
+        if (err && err.code === 1) {
+          gpsDenied = true;
+          renderGpsBanner();
+          updateCamChrome();
+        }
+      },
       { enableHighAccuracy: true, maximumAge: 4000, timeout: 25000 }
     );
   } catch (e) {}
@@ -1846,85 +2893,26 @@ async function handlePhotoSelect(e) {
 
   showToast('Saving photo…');
 
-  let images = [];
+  let ingested = [];
   try {
     for (const f of files) {
-      const raw = await readFileAsDataURL(f);
-      images.push(await compressDataUrl(raw, 0.72, 1600));
+      ingested.push(await ingestPhotoFile(f));
     }
   } catch (err) {
     console.error(err);
-    showToast('Could not read that photo. Try again.');
+    showToast('Could not read that photo. Try HEIC as JPEG, or try again.');
     return;
   }
 
   restoreSession();
-
-  if (!currentVisitId) {
-    showToast('Open a visit first, then take the photo.');
-    return;
-  }
+  await ensureVisitForCapture();
 
   try {
-    if (!currentEquipmentId) {
-      await ensureEquipmentName();
-      if (!$('eq-tag')?.value.trim()) {
-        showToast('Give it a name first — a tag like P-101 or just “Charge pump”');
-        return;
-      }
-      await saveEquipment({ silent: true });
+    let last = null;
+    for (const shot of ingested) {
+      last = await smartAttachPhoto(shot);
     }
-
-    const eq = await dbGet(STORE_EQUIPMENT, currentEquipmentId);
-    if (!eq) {
-      showToast('Save this equipment, then take the photo again.');
-      return;
-    }
-
-    eq.photos = eq.photos || [];
-    const lockedShot = pendingShotType;
-    let lastType = null;
-    for (const dataUrl of images) {
-      let dark = false;
-      try { dark = await isImageDark(dataUrl); } catch (err) {}
-      const autoType = lockedShot || pendingShotType || nextMissingPromptType(eq.photos, eq.eqType || selectedEqType);
-      lastType = autoType;
-      eq.photos.push({
-        id: uuid(),
-        dataUrl,
-        note: dark ? 'Possibly dark' : '',
-        promptType: autoType,
-        lat: null,
-        lng: null,
-        capturedAt: Date.now()
-      });
-    }
-    setPendingShot(null);
-    eq.updatedAt = Date.now();
-    try {
-      await dbPut(STORE_EQUIPMENT, eq);
-    } catch (err) {
-      console.error(err);
-      showToast('Shrinking photo to fit this device…');
-      const start = eq.photos.length - images.length;
-      for (let i = start; i < eq.photos.length; i++) {
-        if (eq.photos[i]) eq.photos[i].dataUrl = await compressDataUrl(eq.photos[i].dataUrl, 0.52, 1024);
-      }
-      await dbPut(STORE_EQUIPMENT, eq);
-    }
-
-    renderPhotos(eq.photos);
-    updatePromptChecks(eq.photos);
-    if ($('photo-count-badge')) {
-      $('photo-count-badge').textContent = String(eq.photos.length);
-      $('photo-count-badge').className = 'badge ' + (eq.photos.length < 2 ? 'warn' : 'ok');
-    }
-    const shotName = lastType ? shotLabel(lastType, eq.eqType || selectedEqType) : 'Photo';
-    const taken = guidedTypes(eq.photos);
-    const nxt = shotsFor(eq.eqType || selectedEqType).find(s => !taken.has(s.id));
-    showToast(shotName + ' saved' + (nxt ? ' · Next: ' + nxt.label : ' · Listed shots done'));
-    persistSession();
-    attachGpsToLatestPhotos(eq.id, images.length);
+    if (last) showToast(last.message);
   } catch (err) {
     console.error(err);
     showToast('Photo did not save. Try one more time.');
@@ -1942,12 +2930,48 @@ async function attachGpsToLatestPhotos(eqId, count) {
       if (i >= 0 && photos[i] && photos[i].lat == null) {
         photos[i].lat = fix.lat;
         photos[i].lng = fix.lng;
+        photos[i].gpsAcc = fix.acc;
+        photos[i].source = photos[i].source || 'gps';
       }
     }
-    if (fresh.lat == null) fresh.lat = fix.lat;
-    if (fresh.lng == null) fresh.lng = fix.lng;
+    if (fresh.lat == null) {
+      fresh.lat = fix.lat;
+      fresh.lng = fix.lng;
+      fresh.gpsAcc = fix.acc;
+    }
     applyFixToForm(fix);
     await dbPut(STORE_EQUIPMENT, fresh);
+  } catch (e) {}
+}
+
+async function applyNameplateOcr(eqId, blob) {
+  try {
+    const parsed = await readNameplate(blob);
+    if (!parsed || (!parsed.tag && !parsed.model && !parsed.serial)) return;
+    const eq = await dbGet(STORE_EQUIPMENT, eqId);
+    if (!eq) return;
+    let changed = false;
+    if (parsed.tag && (!eq.tag || /^[A-Za-z]+ \d+$/.test(eq.tag))) {
+      eq.tag = parsed.tag;
+      if ($('eq-tag') && currentEquipmentId === eqId) $('eq-tag').value = parsed.tag;
+      changed = true;
+    }
+    if (parsed.model && !eq.model) {
+      eq.model = parsed.model;
+      if ($('eq-model') && currentEquipmentId === eqId) $('eq-model').value = parsed.model;
+      changed = true;
+    }
+    if (parsed.serial && !eq.serial) {
+      eq.serial = parsed.serial;
+      if ($('eq-serial') && currentEquipmentId === eqId) $('eq-serial').value = parsed.serial;
+      changed = true;
+    }
+    if (changed) {
+      eq.updatedAt = Date.now();
+      await dbPut(STORE_EQUIPMENT, eq);
+      if ($('header-title') && currentEquipmentId === eqId) $('header-title').textContent = eq.tag || 'Equipment';
+      showToast('Nameplate: ' + [parsed.tag, parsed.model, parsed.serial].filter(Boolean).join(' · '));
+    }
   } catch (e) {}
 }
 
@@ -2073,7 +3097,10 @@ async function saveMarkup() {
   if (!eq || !eq.photos) return;
   const photo = eq.photos.find(p => p.id === currentPhotoId);
   if (photo) {
-    photo.dataUrl = dataUrl; photo.note = note; photo.promptType = promptType;
+    photo.blobId = await putPhotoBlob(dataUrlToBlob(dataUrl), 'image/jpeg');
+    delete photo.dataUrl;
+    photo.note = note;
+    photo.promptType = promptType;
     eq.updatedAt = Date.now();
     await dbPut(STORE_EQUIPMENT, eq);
   }
@@ -2083,15 +3110,12 @@ async function saveMarkup() {
 }
 
 function openQuickCapture() {
-  qcPhotos = [];
-  showView('view-quick-capture');
-  $('header-title').textContent = 'Quick Capture';
-  updateQcUI();
+  startFastTake();
 }
 function updateQcUI() {
   $('qc-count').textContent = qcPhotos.length + ' photo' + (qcPhotos.length!==1?'s':'');
   $('btn-qc-assign').disabled = qcPhotos.length === 0;
-  $('qc-preview').innerHTML = qcPhotos.map(p => `<img src="${p.dataUrl}">`).join('');
+  $('qc-preview').innerHTML = qcPhotos.map(p => `<img src="${p._url || p.dataUrl || ''}">`).join('');
 }
 async function handleQcPhotos(e) {
   const files = Array.from(e.target.files || []);
@@ -2101,15 +3125,22 @@ async function handleQcPhotos(e) {
   const images = [];
   try {
     for (const f of files) {
-      const raw = await readFileAsDataURL(f);
-      images.push(await compressDataUrl(raw, 0.72, 1600));
+      images.push(await ingestPhotoFile(f));
     }
   } catch (err) {
     showToast('Could not read those photos.');
     return;
   }
-  for (const dataUrl of images) {
-    qcPhotos.push({ id: uuid(), dataUrl, lat: null, lng: null, capturedAt: Date.now() });
+  for (const shot of images) {
+    const blobId = await putPhotoBlob(shot.blob, shot.mime);
+    qcPhotos.push({
+      id: uuid(),
+      blobId,
+      _url: URL.createObjectURL(shot.blob),
+      lat: shot.exif?.lat ?? null,
+      lng: shot.exif?.lng ?? null,
+      capturedAt: Date.now()
+    });
   }
   updateQcUI();
   showToast(images.length + ' added to queue');
@@ -2145,7 +3176,7 @@ async function renderAssignUI() {
   });
   const photoSel = $('assign-photo-select');
   photoSel.innerHTML = qcPhotos.map(p => `
-    <div class="photo-thumb ${assignSelectedPhotoIds.has(p.id)?'selected':''}" data-id="${p.id}"><img src="${p.dataUrl}"></div>
+    <div class="photo-thumb ${assignSelectedPhotoIds.has(p.id)?'selected':''}" data-id="${p.id}"><img src="${p._url || p.dataUrl || ''}"></div>
   `).join('');
   photoSel.querySelectorAll('.photo-thumb').forEach(t => {
     t.addEventListener('click', () => {
@@ -2167,7 +3198,8 @@ async function confirmAssign() {
     const autoType = nextMissingPromptType(eq.photos, eq.eqType || 'other');
     eq.photos.push({
       id: p.id,
-      dataUrl: p.dataUrl,
+      blobId: p.blobId,
+      dataUrl: p.blobId ? undefined : p.dataUrl,
       note: '',
       promptType: autoType,
       lat: p.lat || null,
@@ -2209,10 +3241,11 @@ async function saveQuickEq() {
   showToast('Equipment created');
 }
 
-async function generatePDF() {
-  const type = $('report-type').value;
-  const company = $('report-company').value.trim();
-  $('modal-report').classList.add('hidden');
+async function generatePDF(opts = {}) {
+  if (!window.jspdf || !window.jspdf.jsPDF) { showToast('PDF library not loaded'); return; }
+  const type = opts.type || $('report-type')?.value || 'full';
+  const company = opts.company != null ? opts.company : ($('report-company')?.value.trim() || '');
+  if (!opts.silent) $('modal-report')?.classList.add('hidden');
   const visit = await dbGet(STORE_VISITS, currentVisitId);
   if (!visit) return;
   let items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
@@ -2287,6 +3320,7 @@ async function generatePDF() {
       if (eq.priority) { doc.text('Priority: ' + eq.priority, margin, y); y += 13; }
       if (eq.recommendation) { doc.text('Recommendation: ' + eq.recommendation, margin, y); y += 13; }
       if (eq.needsFollowup) { doc.setTextColor(180,100,0); doc.text('⚑ Needs follow-up', margin, y); doc.setTextColor(0); y += 13; }
+      if ((eq.voiceNotes || []).length) { doc.text('Voice notes: ' + eq.voiceNotes.length, margin, y); y += 13; }
       if (eq.notes) {
         const ns = doc.splitTextToSize('Notes: ' + eq.notes, contentW);
         doc.text(ns, margin, y); y += ns.length*12 + 6;
@@ -2295,11 +3329,13 @@ async function generatePDF() {
         for (const photo of eq.photos) {
           if (y > 600) { doc.addPage(); y = margin; }
           try {
-            const props = doc.getImageProperties(photo.dataUrl);
+            const src = await photoDataUrl(photo);
+            if (!src) continue;
+            const props = doc.getImageProperties(src);
             let iw = props.width, ih = props.height;
             const ratio = Math.min(contentW/iw, 200/ih);
             iw *= ratio; ih *= ratio;
-            doc.addImage(photo.dataUrl, 'JPEG', margin, y, iw, ih);
+            doc.addImage(src, 'JPEG', margin, y, iw, ih);
             y += ih + 6;
             const cap = [photo.promptType ? shotLabel(photo.promptType, eq.eqType) : '', photo.note].filter(Boolean).join(' — ');
             if (cap) { doc.setFontSize(9); doc.setTextColor(80); doc.text(cap, margin, y); doc.setTextColor(0); y += 12; }
@@ -2312,6 +3348,7 @@ async function generatePDF() {
     }
   }
   if (!items.length) { doc.setFontSize(11); doc.text('No equipment items.', margin, y); }
+  if (opts.returnBlob) return doc.output('blob');
   doc.save(`FieldVault_${(visit.title||'Visit').replace(/[^a-z0-9]/gi,'_').slice(0,30)}_${type}.pdf`);
   showToast('PDF ready');
 }
@@ -2341,7 +3378,7 @@ async function openPhotosLibrary() {
   rerender();
 }
 
-function renderPhotosLibrary(items, filterId, shotId) {
+async function renderPhotosLibrary(items, filterId, shotId) {
   const grid = $('photos-library-grid');
   let photos = [];
   for (const eq of items) {
@@ -2355,9 +3392,10 @@ function renderPhotosLibrary(items, filterId, shotId) {
     grid.innerHTML = '<p style="color:var(--text-muted)">No photos yet for this visit.</p>';
     return;
   }
+  await hydratePhotos(photos);
   grid.innerHTML = photos.map(p => `
     <div class="photo-thumb" data-eq="${p.eqId}" data-photo="${p.id}">
-      <img src="${p.dataUrl}" alt="">
+      <img src="${p._url || p.dataUrl || ''}" alt="">
       ${p.promptType ? `<div class="photo-type-badge">${escapeHtml(shotLabel(p.promptType, p.eqType))}</div>` : ''}
       <div class="photo-lib-meta">
         <div class="tag">${escapeHtml(p.tag || '')}</div>
@@ -2384,6 +3422,7 @@ async function openMapView() {
 }
 
 async function initMap() {
+  if (typeof L === 'undefined') { showToast('Map library not loaded'); return; }
   const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
   const withGps = items.filter(e => e.lat != null && e.lng != null);
 
@@ -2417,9 +3456,15 @@ async function initMap() {
   window._mapStreet = street;
   window._mapSat = satellite;
 
+  const annotated = items.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) }));
+  const gap = nextWalkGap(annotated, lastFix?.lat ?? withGps[0]?.lat, lastFix?.lng ?? withGps[0]?.lng);
+  if ($('map-walk-hud') && $('map-walk-hud-text')) {
+    $('map-walk-hud').classList.toggle('hidden', !gap);
+    $('map-walk-hud-text').textContent = walkGapText(gap);
+  }
+
   const bounds = [];
   for (const eq of withGps) {
-    // nearest neighbor distance for context
     let nearInfo = '';
     let best = Infinity, bestTag = '';
     for (const o of withGps) {
@@ -2428,22 +3473,44 @@ async function initMap() {
       if (d < best) { best = d; bestTag = o.tag || ''; }
     }
     if (best < Infinity) nearInfo = `<br><small>Nearest: ${escapeHtml(bestTag)} (${formatDist(best)})</small>`;
-    const m = L.marker([eq.lat, eq.lng])
+    const empty = !(eq.photos || []).length;
+    const isGap = gap?.eq && gap.eq.id === eq.id;
+    const color = isGap ? '#e07a5f' : (empty || returnWalkMode ? '#d4a017' : '#8fb8c9');
+    const m = L.circleMarker([eq.lat, eq.lng], {
+      radius: isGap ? 11 : 7,
+      color,
+      fillColor: color,
+      fillOpacity: 0.9,
+      weight: 2
+    })
       .addTo(mapInstance)
-      .bindPopup(`<strong>${escapeHtml(eq.tag || '')}</strong><br>${escapeHtml(eq.locationDesc || '')}${nearInfo}<br>
+      .bindPopup(`<strong>${escapeHtml(eq.tag || '')}</strong>${isGap ? '<br>Next gap' : ''}${empty ? '<br>No photos yet' : ''}<br>${escapeHtml(eq.locationDesc || '')}${nearInfo}<br>
         <a href="https://maps.apple.com/?daddr=${eq.lat},${eq.lng}&q=${encodeURIComponent(eq.tag||'Equipment')}" target="_blank">Navigate (Apple)</a> ·
         <a href="https://www.google.com/maps/dir/?api=1&destination=${eq.lat},${eq.lng}" target="_blank">Navigate (Google)</a>`);
     mapMarkers.push(m);
     bounds.push([eq.lat, eq.lng]);
+    if (isGap) m.openPopup();
+  }
+  if (lastFix) {
+    L.circleMarker([lastFix.lat, lastFix.lng], { radius: 8, color: '#5ee0b5', fillColor: '#5ee0b5', fillOpacity: 0.85 })
+      .addTo(mapInstance)
+      .bindPopup('You are here');
+    bounds.push([lastFix.lat, lastFix.lng]);
+    void prefetchWalkTiles(lastFix.lat, lastFix.lng);
+  } else if (withGps[0]) {
+    void prefetchWalkTiles(withGps[0].lat, withGps[0].lng);
   }
   if (bounds.length > 1) mapInstance.fitBounds(bounds, { padding: [40, 40] });
   else if (bounds.length === 1) mapInstance.setView(bounds[0], 18);
 
+  const path = walkLine(items);
+  if (path.length >= 2) {
+    L.polyline(path.map((p) => [p.lat, p.lng]), { color: '#8fb8c9', weight: 3, opacity: 0.85 }).addTo(mapInstance);
+  }
   $('map-legend').innerHTML = withGps.length
-    ? `<div>${withGps.length} equipment with GPS pinned</div><div>Tap a pin for navigation links</div>`
+    ? `<div>${withGps.length} pins · you are the green dot · next gap is coral</div><div>Tap a pin for navigation links</div>${path.length >= 2 ? `<div class="walk-line-legend">Walk path · ${path.length} points</div>` : ''}${returnWalkMode ? '<div>Return walk — empty pins still need photos</div>' : ''}`
     : '<div>No GPS points yet. Take photos to auto-capture coordinates.</div>';
 
-  // Fix leaflet size after view show
   setTimeout(() => mapInstance.invalidateSize(), 200);
 }
 
@@ -2508,7 +3575,8 @@ async function analyzeCurrentPhoto() {
   showToast('Analyzing photo…');
   try {
     // Use a compressed data URL if huge
-    let dataUrl = photo.dataUrl;
+    let dataUrl = await photoDataUrl(photo);
+    if (!dataUrl) { showToast('Photo not readable'); return; }
     if (dataUrl.length > 1_500_000) {
       dataUrl = await compressDataUrl(dataUrl, 0.6, 1280);
     }
@@ -2605,7 +3673,7 @@ async function openGlobalPhotos() {
   renderGlobalPhotos(visits, equipment, filter ? filter.value : 'all');
 }
 
-function renderGlobalPhotos(visits, equipment, visitFilter) {
+async function renderGlobalPhotos(visits, equipment, visitFilter) {
   const grid = $('global-photos-grid');
   if (!grid) return;
   const visitMap = Object.fromEntries(visits.map(v => [v.id, v]));
@@ -2628,9 +3696,10 @@ function renderGlobalPhotos(visits, equipment, visitFilter) {
     grid.innerHTML = '<div class="empty-state"><p>No photos stored yet.<br>Add photos during a visit and they will appear here.</p></div>';
     return;
   }
+  await hydratePhotos(photos);
   grid.innerHTML = photos.map(p => `
     <div class="photo-thumb" data-eq="${p.eqId}" data-visit="${p.visitId}" data-photo="${p.id}">
-      <img src="${p.dataUrl}" alt="">
+      <img src="${p._url || p.dataUrl || ''}" alt="">
       <div class="photo-lib-meta">
         <div class="tag">${escapeHtml(p.tag || '')}</div>
         <div>${escapeHtml(p.visitTitle)}</div>
@@ -2658,6 +3727,7 @@ async function openGlobalMap() {
   const visitMap = Object.fromEntries(visits.map(v => [v.id, v]));
   const withGps = equipment.filter(e => e.lat != null && e.lng != null);
 
+  if (typeof L === 'undefined') { showToast('Map library not loaded'); return; }
   const container = $('global-map-container');
   if (!container) return;
   if (globalMapInstance) {
@@ -2763,23 +3833,7 @@ function toggleModelingMode() {
 
 // ===== GPS clustering =====
 function clusterByGps(items, radiusM = 25) {
-  const pts = items.filter(e => e.lat != null && e.lng != null);
-  const used = new Set();
-  const clusters = [];
-  for (let i = 0; i < pts.length; i++) {
-    if (used.has(pts[i].id)) continue;
-    const group = [pts[i]];
-    used.add(pts[i].id);
-    for (let j = i + 1; j < pts.length; j++) {
-      if (used.has(pts[j].id)) continue;
-      const d = haversineM(pts[i].lat, pts[i].lng, pts[j].lat, pts[j].lng);
-      // also cluster if close to any member
-      const near = group.some(g => haversineM(g.lat, g.lng, pts[j].lat, pts[j].lng) <= radiusM);
-      if (near) { group.push(pts[j]); used.add(pts[j].id); }
-    }
-    clusters.push(group);
-  }
-  return clusters;
+  return clusterByAccuracy(items, radiusM);
 }
 
 let pendingClusters = [];
@@ -2867,6 +3921,9 @@ async function openWalkSequence() {
     }
   }
   events.sort((a,b) => a.t - b.t);
+  for (const ev of events) {
+    if (ev.photo) await photoSrc(ev.photo);
+  }
   const list = $('walk-seq-list');
   if (!events.length) {
     list.innerHTML = '<p class="help-text">Nothing captured yet.</p>';
@@ -2874,18 +3931,28 @@ async function openWalkSequence() {
   }
   list.innerHTML = events.map((ev, i) => {
     const time = ev.t ? new Date(ev.t).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}) : '—';
-    const thumb = ev.photo ? `<img src="${ev.photo.dataUrl}" alt="" style="width:56px;height:56px;object-fit:cover;border-radius:8px">` : '';
+    const thumb = ev.photo ? `<img src="${ev.photo._url || ev.photo.dataUrl || ''}" alt="" style="width:56px;height:56px;object-fit:cover;border-radius:8px">` : '';
     return `<div class="card" data-id="${ev.eq.id}">
-      <div class="card-title">${i+1}. <span class="tag-badge">${escapeHtml(ev.eq.tag||'')}</span></div>
+      <div class="card-title">${i+1}. <span class="tag-badge">${escapeHtml(ev.eq.tag||'')}</span>${isUntitledTag(ev.eq.tag) ? ' <span class="untitled-hint">Untitled</span>' : ''}</div>
       <div class="card-meta">
         <span class="walk-time">${time}</span>
         ${ev.eq.lat!=null ? `<span class="coords-display">${Number(ev.eq.lat).toFixed(5)}, ${Number(ev.eq.lng).toFixed(5)}</span>` : ''}
       </div>
       ${thumb}
+      ${isUntitledTag(ev.eq.tag) ? `<button type="button" class="btn-secondary btn-sm walk-name" data-id="${ev.eq.id}">Name</button>` : ''}
     </div>`;
   }).join('');
+  list.querySelectorAll('.walk-name').forEach((b) => {
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      lastCapturedEqId = b.dataset.id;
+      currentEquipmentId = b.dataset.id;
+      openNamePinModal();
+    });
+  });
   list.querySelectorAll('.card').forEach(c => {
-    c.addEventListener('click', () => {
+    c.addEventListener('click', (ev) => {
+      if (ev.target.closest('button')) return;
       currentEquipmentId = c.dataset.id;
       showView('view-equipment-detail');
       loadEquipmentDetail(currentEquipmentId);
@@ -2947,7 +4014,7 @@ function safeName(s) {
   return String(s || 'item').replace(/[^a-z0-9._-]+/gi, '_').slice(0, 40);
 }
 
-async function exportVisitPackage() {
+async function exportVisitPackage(opts = {}) {
   if (typeof JSZip === 'undefined') { showToast('ZIP library not loaded'); return; }
   const visit = await dbGet(STORE_VISITS, currentVisitId);
   if (!visit) return;
@@ -2971,10 +4038,26 @@ async function exportVisitPackage() {
       locationDesc: e.locationDesc, lat: e.lat, lng: e.lng,
       notes: e.notes, photoCount: (e.photos||[]).length,
       photoTypes: (e.photos||[]).map(p => p.promptType).filter(Boolean),
+      voiceCount: (e.voiceNotes || []).length,
       readiness: equipmentReadiness(e)
     }))
   };
-  zip.file('visit.json', JSON.stringify(meta, null, 2));
+  zip.file('visit.json', JSON.stringify({
+    ...meta,
+    walkScore: visitReadinessScore(items)
+  }, null, 2));
+  zip.file('visit.geojson', JSON.stringify(walkGeoJson({ ...visit, readiness: visitReadinessScore(items) }, items.map((e) => ({ ...e, readiness: equipmentReadiness(e) })), areas), null, 2));
+  let voiceIdx = 1;
+  for (const eq of items) {
+    for (const note of eq.voiceNotes || []) {
+      const src = note.dataUrl || '';
+      const data = src.split(',')[1];
+      if (!data) continue;
+      const ext = src.includes('audio/webm') ? 'webm' : src.includes('audio/mp4') ? 'm4a' : 'webm';
+      zip.file('voice/' + safeName(eq.tag) + '_' + voiceIdx + '.' + ext, data, { base64: true });
+      voiceIdx++;
+    }
+  }
   if (isDefense()) {
     zip.file('README.txt', [
       'FieldVault ground-truth / digital-twin package',
@@ -2989,34 +4072,114 @@ async function exportVisitPackage() {
     ].join('\n'));
   }
 
-  const csvCell = (v) => '"' + String(v ?? '').replace(/"/g, '') + '"';
-  let csv = 'tag,type,service,pid,line,mfr,model,serial,area,location,lat,lng,notes,photo_file,view_type\n';
+  let csv = 'tag,type,service,pid,line,mfr,model,serial,area,location,lat,lng,gps_acc,notes,readiness,photo_file,view_type\n';
   let photoIdx = 1;
   for (const eq of items) {
     const areaName = areaMap[eq.areaId] || 'unassigned';
     const folder = 'photos/' + safeName(areaName) + '/' + safeName(eq.tag);
     const photos = eq.photos || [];
     const ident = [eq.tag||'', eq.eqType||'', eq.service||'', eq.pid||'', eq.lineNo||'', eq.mfr||'', eq.model||'', eq.serial||''];
+    const ready = equipmentReadiness(eq);
     if (!photos.length) {
-      csv += ident.map(csvCell).join(',') + ',' + csvCell(areaName) + ',' + csvCell(eq.locationDesc) + ',' + csvCell(eq.lat??'') + ',' + csvCell(eq.lng??'') + ',' + csvCell(eq.notes) + ',,\n';
+      csv += ident.map(csvCell).join(',') + ',' + csvCell(areaName) + ',' + csvCell(eq.locationDesc) + ',' + csvCell(eq.lat??'') + ',' + csvCell(eq.lng??'') + ',' + csvCell(eq.gpsAcc??'') + ',' + csvCell(eq.notes) + ',' + csvCell(ready) + ',,\n';
     }
     for (const p of photos) {
       const fname = safeName(eq.tag) + '_' + (p.promptType || 'photo') + '_' + photoIdx + '.jpg';
       photoIdx++;
-      const data = (p.dataUrl || '').split(',')[1];
+      const src = await photoDataUrl(p);
+      const data = (src || '').split(',')[1];
       if (data) zip.file(folder + '/' + fname, data, { base64: true });
-      csv += ident.map(csvCell).join(',') + ',' + csvCell(areaName) + ',' + csvCell(eq.locationDesc) + ',' + csvCell(p.lat??eq.lat??'') + ',' + csvCell(p.lng??eq.lng??'') + ',' + csvCell(p.note||eq.notes) + ',' + csvCell(folder + '/' + fname) + ',' + csvCell(p.promptType) + '\n';
+      csv += ident.map(csvCell).join(',') + ',' + csvCell(areaName) + ',' + csvCell(eq.locationDesc) + ',' + csvCell(p.lat??eq.lat??'') + ',' + csvCell(p.lng??eq.lng??'') + ',' + csvCell(p.gpsAcc??eq.gpsAcc??'') + ',' + csvCell(p.note||eq.notes) + ',' + csvCell(ready) + ',' + csvCell(folder + '/' + fname) + ',' + csvCell(p.promptType) + '\n';
     }
   }
   zip.file('equipment.csv', csv);
 
+  if (opts && opts.client) {
+    showToast('Building client package…');
+    try {
+      const pdf = await generatePDF({
+        type: 'full',
+        company: visit.client || 'FieldVault',
+        returnBlob: true,
+        silent: true
+      });
+      if (pdf) zip.file('CLIENT_PACKAGE.pdf', pdf);
+    } catch (e) {
+      console.warn(e);
+    }
+    const gap = nextWalkGap(items.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) })), lastFix?.lat, lastFix?.lng);
+    zip.file('HANDOFF.html', handoffHtml(visit, items, walkGapText(gap)));
+  }
+
   const blob = await zip.generateAsync({ type: 'blob' });
+  const filename = (opts && opts.client ? 'FieldVault_client_' : 'FieldVault_') + safeName(visit.title) + '.zip';
+  const file = new File([blob], filename, { type: 'application/zip' });
+  if (opts && opts.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ title: visit.title || 'FieldVault', files: [file] });
+      showToast('Package shared');
+      return;
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;
+    }
+  }
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'FieldVault_' + safeName(visit.title) + '.zip';
+  a.download = filename;
   a.click();
   URL.revokeObjectURL(a.href);
   showToast('Export downloaded');
+}
+
+async function shareVisitPackage() {
+  await exportVisitPackage({ share: true, client: true });
+}
+
+async function sendToClient() {
+  if (!currentVisitId) { showToast('Open a visit first'); return; }
+  await exportVisitPackage({ share: true, client: true });
+}
+
+async function openHandoffModal() {
+  if (!currentVisitId) { showToast('Open a visit first'); return; }
+  const visit = await dbGet(STORE_VISITS, currentVisitId);
+  const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
+  if ($('handoff-qr')) $('handoff-qr').src = handoffQrUrl(visit, items);
+  if ($('handoff-line')) $('handoff-line').textContent = handoffLine(visit, items);
+  $('modal-handoff')?.classList.remove('hidden');
+}
+
+async function shareHandoffHtml() {
+  if (!currentVisitId) { showToast('Open a visit first'); return; }
+  const visit = await dbGet(STORE_VISITS, currentVisitId);
+  const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
+  const gap = nextWalkGap(items.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) })), lastFix?.lat, lastFix?.lng);
+  const html = handoffHtml(visit, items, walkGapText(gap));
+  const file = new File([html], 'FieldVault_handoff.html', { type: 'text/html' });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ title: visit.title || 'FieldVault', files: [file] });
+      showToast('Handoff shared');
+      return;
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;
+    }
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(file);
+  a.download = file.name;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  showToast('Handoff downloaded');
+}
+
+async function addToHomeScreen() {
+  if (canInstallPwa()) {
+    const ok = await promptInstallPwa();
+    showToast(ok ? 'Added to Home Screen' : 'Install dismissed');
+    return;
+  }
+  showToast('Use your browser Share menu → Add to Home Screen');
 }
 
 // ===== Backup / restore =====
@@ -3024,11 +4187,24 @@ async function backupAllData() {
   const visits = await dbGetAll(STORE_VISITS);
   const areas = await dbGetAll(STORE_AREAS);
   const equipment = await dbGetAll(STORE_EQUIPMENT);
+  const photoRows = await dbGetAll(STORE_PHOTOS).catch(() => []);
+  const photos = {};
+  for (const rec of photoRows) {
+    if (!rec?.blob) continue;
+    photos[rec.id] = await blobToDataUrl(rec.blob);
+  }
+  const slimEq = equipment.map((e) => ({
+    ...e,
+    photos: (e.photos || []).map((p) => {
+      const { dataUrl, _url, ...rest } = p;
+      return rest;
+    })
+  }));
   const payload = {
     app: 'FieldVault',
-    version: 5,
+    version: 6,
     exportedAt: new Date().toISOString(),
-    visits, areas, equipment
+    visits, areas, equipment: slimEq, photos
   };
   const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
   const a = document.createElement('a');
@@ -3047,7 +4223,21 @@ async function restoreBackup(file) {
     if (!confirm('Restore will add this backup data onto this device. Continue?')) return;
     for (const v of (data.visits || [])) await dbPut(STORE_VISITS, v);
     for (const a of (data.areas || [])) await dbPut(STORE_AREAS, a);
-    for (const e of (data.equipment || [])) await dbPut(STORE_EQUIPMENT, e);
+    for (const [id, dataUrl] of Object.entries(data.photos || {})) {
+      await dbPut(STORE_PHOTOS, { id, blob: dataUrlToBlob(dataUrl), mime: 'image/jpeg', createdAt: Date.now() });
+    }
+    for (const e of (data.equipment || [])) {
+      if (e.photos) {
+        for (const p of e.photos) {
+          if (p.dataUrl && !p.blobId) {
+            p.blobId = uuid();
+            await dbPut(STORE_PHOTOS, { id: p.blobId, blob: dataUrlToBlob(p.dataUrl), mime: 'image/jpeg', createdAt: Date.now() });
+            delete p.dataUrl;
+          }
+        }
+      }
+      await dbPut(STORE_EQUIPMENT, e);
+    }
     showToast('Backup restored');
     showView('view-visits');
   } catch (err) {
@@ -3066,10 +4256,42 @@ function initEvents() {
   $('btn-mode-defense')?.addEventListener('click', () => setProductMode('defense'));
   $('btn-coach-dismiss')?.addEventListener('click', () => {
     try { localStorage.setItem('fieldvault_coach', '1'); } catch (e) {}
-    renderCoach();
+    renderCoach(latestVisitId ? 1 : 0);
   });
   $('tile-add-eq')?.addEventListener('click', () => openNewEquipment(false));
+  $('btn-sticky-take')?.addEventListener('click', () => startFastTake(stickyNextShotId));
   $('tile-quick')?.addEventListener('click', openQuickCapture);
+  $('fv-cam-done')?.addEventListener('click', () => {
+    closeFieldCameraUi();
+    if (currentVisitId) {
+      showView('view-visit-detail');
+      loadVisitDetail(currentVisitId);
+    }
+  });
+  $('fv-cam-shutter')?.addEventListener('click', () => void shutterFieldCamera());
+  $('fv-cam-torch')?.addEventListener('click', () => void toggleTorch());
+  document.querySelectorAll('.fv-cam-issue').forEach((b) => {
+    b.addEventListener('click', () => void flagCameraIssue(b.dataset.issue));
+  });
+  $('fv-cam-name')?.addEventListener('click', openNamePinModal);
+  $('fv-cam-newpin')?.addEventListener('click', () => {
+    forceNewPin = true;
+    currentEquipmentId = null;
+    persistSession();
+    updateCamChrome();
+    updateCamAttach('Next snap starts a new pin');
+    showToast('Next snap is a new pin');
+  });
+  $('btn-name-pin-close')?.addEventListener('click', () => $('modal-name-pin')?.classList.add('hidden'));
+  $('btn-name-pin-skip')?.addEventListener('click', () => $('modal-name-pin')?.classList.add('hidden'));
+  $('btn-name-pin-save')?.addEventListener('click', () => void saveNamePin());
+  $('btn-voice-name-pin')?.addEventListener('click', function(){ startVoice('name-pin-tag', this); });
+  $('name-pin-tag')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void saveNamePin();
+    }
+  });
   $('tile-map')?.addEventListener('click', openMapView);
   $('tile-missing')?.addEventListener('click', openReadyCheck);
   $('btn-new-visit').addEventListener('click', () => openVisitModal(false));
@@ -3080,7 +4302,10 @@ function initEvents() {
   });
   $('btn-highvis').addEventListener('click', toggleHighVis);
 
-  document.querySelectorAll('.modal-close').forEach(b => b.addEventListener('click', () => $('modal-visit').classList.add('hidden')));
+  document.querySelectorAll('.modal-close').forEach(b => b.addEventListener('click', () => {
+    pendingCameraAfterVisit = false;
+    $('modal-visit').classList.add('hidden');
+  }));
   document.querySelectorAll('.modal-close-area').forEach(b => b.addEventListener('click', () => $('modal-area').classList.add('hidden')));
   document.querySelectorAll('.modal-close-report').forEach(b => b.addEventListener('click', () => $('modal-report').classList.add('hidden')));
   document.querySelectorAll('.modal-close-qe').forEach(b => b.addEventListener('click', () => $('modal-quick-eq').classList.add('hidden')));
@@ -3195,6 +4420,10 @@ function initEvents() {
   });
   $('more-modeling')?.addEventListener('click', () => { setMoreOpen(false); toggleModelingMode(); });
   $('more-backup')?.addEventListener('click', () => { setMoreOpen(false); backupAllData(); });
+  $('more-install')?.addEventListener('click', () => { setMoreOpen(false); void addToHomeScreen(); });
+  $('more-handoff')?.addEventListener('click', () => { setMoreOpen(false); void openHandoffModal(); });
+  $('more-export')?.addEventListener('click', () => { setMoreOpen(false); void exportVisitPackage(); });
+  $('more-pdf')?.addEventListener('click', () => { setMoreOpen(false); $('modal-report')?.classList.remove('hidden'); });
   $('btn-gmap-satellite')?.addEventListener('click', () => setGlobalMapLayer('satellite'));
   $('btn-gmap-street')?.addEventListener('click', () => setGlobalMapLayer('street'));
   $('btn-gmap-locate')?.addEventListener('click', globalMapLocate);
@@ -3204,6 +4433,20 @@ function initEvents() {
   $('btn-apply-clusters')?.addEventListener('click', applyClusters);
   $('btn-walk-seq')?.addEventListener('click', openWalkSequence);
   $('btn-export-package')?.addEventListener('click', exportVisitPackage);
+  $('btn-share-package')?.addEventListener('click', shareVisitPackage);
+  $('btn-leave-site')?.addEventListener('click', () => void leaveSite());
+  $('btn-leave-site-ready')?.addEventListener('click', () => void leaveSite());
+  $('btn-send-client')?.addEventListener('click', () => void sendToClient());
+  $('btn-handoff')?.addEventListener('click', () => void openHandoffModal());
+  $('btn-handoff-close')?.addEventListener('click', () => $('modal-handoff')?.classList.add('hidden'));
+  $('btn-handoff-done')?.addEventListener('click', () => $('modal-handoff')?.classList.add('hidden'));
+  $('btn-handoff-html')?.addEventListener('click', () => void shareHandoffHtml());
+  $('btn-gps-retry')?.addEventListener('click', () => {
+    gpsDenied = false;
+    renderGpsBanner();
+    captureGps({ toast: true, fresh: true });
+  });
+  $('btn-walk-again')?.addEventListener('click', () => walkAgainFrom(currentVisitId));
   $('btn-backup')?.addEventListener('click', backupAllData);
   $('restore-input')?.addEventListener('change', (e) => {
     const f = e.target.files && e.target.files[0];
@@ -3232,6 +4475,8 @@ async function init() {
     initSpeech();
     initEvents();
     bindKeyboardSafe();
+    bindFieldShutterKeys();
+    bindCompass();
     loadCachedFix();
     updateGpsStatusUi();
     if (localStorage.getItem('fieldvault_modeling') === '1') {
@@ -3239,8 +4484,9 @@ async function init() {
     }
     const saved = localStorage.getItem('fieldvault_product_mode') === 'defense' ? 'defense' : 'commercial';
     applyProductMode(saved, { silent: true });
-    restoreSession();
-    showView('view-visits');
+    const session = restoreSession();
+    if (currentVisitId) latestVisitId = currentVisitId;
+    await restoreLastPlace(session);
   } catch (err) {
     console.error(err);
     alert('Failed to start FieldVault');
@@ -3248,7 +4494,170 @@ async function init() {
 }
 
 export async function initFieldVault() {
+  await ensureFieldVaultLibs();
   await init();
+}
+
+async function demoPhotoBlob(label, color) {
+  return canvasJpegBlob((ctx, c) => {
+    ctx.fillStyle = color;
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.fillStyle = 'rgba(0,0,0,0.28)';
+    ctx.fillRect(0, 0, c.width, 88);
+    ctx.fillStyle = '#eef2f5';
+    ctx.font = '600 28px "IBM Plex Sans", system-ui, sans-serif';
+    ctx.fillText(label, 24, 52);
+    ctx.font = '16px "IBM Plex Sans", system-ui, sans-serif';
+    ctx.fillStyle = '#c5d0d8';
+    ctx.fillText('FieldVault demo frame', 24, 78);
+  });
+}
+
+async function demoPhoto(promptType, label, color, lat, lng) {
+  const blob = await demoPhotoBlob(label, color);
+  const blobId = await putPhotoBlob(blob, 'image/jpeg');
+  return {
+    id: uuid(),
+    blobId,
+    promptType,
+    note: '',
+    lat,
+    lng,
+    gpsAcc: 8,
+    source: 'demo',
+    capturedAt: Date.now()
+  };
+}
+
+export async function seedFieldVaultDemo() {
+  if (!db) await openDB();
+  const existing = await dbGetAll(STORE_VISITS);
+  if (existing.length) return false;
+
+  const now = Date.now();
+  const visitId = 'fv-demo-walkdown';
+  const areas = {
+    pumps: { id: 'fv-demo-area-pumps', visitId, name: 'Pump area', notes: 'Charge pumps at the crude unit.', createdAt: now, updatedAt: now },
+    vessels: { id: 'fv-demo-area-vessels', visitId, name: 'Vessels & exchangers', notes: 'Overhead drum and crude/resid exchanger.', createdAt: now, updatedAt: now },
+    rack: { id: 'fv-demo-area-rack', visitId, name: 'Pipe rack', notes: 'Battery-limit valves.', createdAt: now, updatedAt: now },
+    tanks: { id: 'fv-demo-area-tanks', visitId, name: 'Tank farm', notes: 'Suggested — no equipment tagged yet.', createdAt: now, updatedAt: now },
+    utils: { id: 'fv-demo-area-utils', visitId, name: 'Utilities', notes: 'Suggested — no equipment tagged yet.', createdAt: now, updatedAt: now }
+  };
+  const p101 = { lat: 29.7362, lng: -95.0128 };
+  const e210 = { lat: 29.7365, lng: -95.0134 };
+  const v301 = { lat: 29.7358, lng: -95.0131 };
+
+  await dbPut(STORE_VISITS, {
+    id: visitId,
+    title: 'Crude unit walkdown',
+    client: 'Gulf Coast Refining',
+    facility: 'Crude unit',
+    date: new Date().toISOString().slice(0, 10),
+    overallNotes: 'Sample visit. P-101 is nearly leave-ready. XV-402 still needs photos and a GPS pin.',
+    template: 'walkdown',
+    createdAt: now,
+    updatedAt: now
+  });
+  for (const area of Object.values(areas)) await dbPut(STORE_AREAS, area);
+
+  await dbPut(STORE_EQUIPMENT, {
+    id: 'fv-demo-eq-p101',
+    visitId,
+    areaId: areas.pumps.id,
+    tag: 'P-101',
+    eqType: 'pump',
+    locationDesc: 'Charge pump at the crude unit inlet',
+    service: 'Crude charge',
+    pid: 'P&ID-CU-101',
+    mfr: 'Flowtec',
+    model: 'FT-80',
+    serial: 'A18422',
+    lat: p101.lat,
+    lng: p101.lng,
+    gpsAcc: 8,
+    condition: 'Fair',
+    priority: 'Medium',
+    notes: 'Slight stain at the seal. Nameplate readable.',
+    needsFollowup: false,
+    photos: [
+      await demoPhoto('overall', 'P-101 · overall', '#3d4f5c', p101.lat, p101.lng),
+      await demoPhoto('tag', 'P-101 · nameplate', '#2c3a44', p101.lat, p101.lng),
+      await demoPhoto('coupling', 'P-101 · coupling', '#4a5d4a', p101.lat, p101.lng),
+      await demoPhoto('seal', 'P-101 · seal', '#5c4a3d', p101.lat, p101.lng)
+    ],
+    createdAt: now,
+    updatedAt: now
+  });
+  await dbPut(STORE_EQUIPMENT, {
+    id: 'fv-demo-eq-e210',
+    visitId,
+    areaId: areas.vessels.id,
+    tag: 'E-210',
+    eqType: 'exchanger',
+    locationDesc: 'Crude / resid exchanger, south bay',
+    service: 'Crude / resid',
+    pid: 'P&ID-CU-210',
+    lat: e210.lat,
+    lng: e210.lng,
+    gpsAcc: 10,
+    condition: 'Good',
+    priority: 'Low',
+    notes: 'Wide and nameplate in. Detail shots still open.',
+    needsFollowup: false,
+    photos: [
+      await demoPhoto('overall', 'E-210 · overall', '#3d4f5c', e210.lat, e210.lng),
+      await demoPhoto('tag', 'E-210 · nameplate', '#2c3a44', e210.lat, e210.lng)
+    ],
+    createdAt: now,
+    updatedAt: now
+  });
+  await dbPut(STORE_EQUIPMENT, {
+    id: 'fv-demo-eq-v301',
+    visitId,
+    areaId: areas.vessels.id,
+    tag: 'V-301',
+    eqType: 'vessel',
+    locationDesc: 'Overhead drum, west of the exchanger bay',
+    service: 'Crude overhead',
+    pid: 'P&ID-CU-301',
+    lat: v301.lat,
+    lng: v301.lng,
+    gpsAcc: 12,
+    condition: 'Poor',
+    priority: 'High',
+    recommendation: 'Follow-up on insulation and missing tag paint.',
+    notes: 'Wide shot only. Nameplate still missing.',
+    needsFollowup: true,
+    photos: [
+      await demoPhoto('overall', 'V-301 · overall', '#4a3d3d', v301.lat, v301.lng)
+    ],
+    createdAt: now,
+    updatedAt: now
+  });
+  await dbPut(STORE_EQUIPMENT, {
+    id: 'fv-demo-eq-xv402',
+    visitId,
+    areaId: areas.rack.id,
+    tag: 'XV-402',
+    eqType: 'valve',
+    locationDesc: 'Battery-limit block on the charge line',
+    service: 'Crude charge',
+    pid: 'P&ID-CU-101',
+    lat: null,
+    lng: null,
+    condition: '',
+    priority: 'Urgent',
+    notes: 'No photos or GPS yet — good place to show Take and pin.',
+    needsFollowup: true,
+    photos: [],
+    createdAt: now,
+    updatedAt: now
+  });
+
+  latestVisitId = visitId;
+  await renderVisitsList();
+  showToast('Sample crude-unit walkdown loaded');
+  return true;
 }
 
   

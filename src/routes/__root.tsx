@@ -30,11 +30,12 @@ function Shell() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const play =
     pathname.endsWith("/play") || pathname.endsWith("/see") || pathname.endsWith("/craft");
+  const fieldvaultPlay = pathname === "/apps/fieldvault/play" || pathname.startsWith("/apps/fieldvault/play");
   if (play) {
     return (
       <>
         <Outlet />
-        <Aether />
+        {fieldvaultPlay ? null : <Aether />}
       </>
     );
   }
@@ -76,7 +77,10 @@ export const Route = createRootRoute({
         content: "width=device-width, initial-scale=1, viewport-fit=cover",
       },
       { title: "FieldVault" },
-      { name: "theme-color", content: "#0c0c0d" },
+      { name: "theme-color", content: "#0c0f12" },
+      { name: "apple-mobile-web-app-capable", content: "yes" },
+      { name: "apple-mobile-web-app-title", content: "FieldVault" },
+      { name: "mobile-web-app-capable", content: "yes" },
       {
         name: "description",
         content:
@@ -85,6 +89,8 @@ export const Route = createRootRoute({
     ],
     links: [
       { rel: "icon", type: "image/svg+xml", href: "/favicon.svg" },
+      { rel: "manifest", href: "/fv-manifest.webmanifest" },
+      { rel: "apple-touch-icon", href: "/favicon.svg" },
       { rel: "stylesheet", href: appCss },
     ],
   }),

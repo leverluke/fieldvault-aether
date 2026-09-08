@@ -13,7 +13,7 @@ function AppsIndex() {
         Apps
       </h1>
       <p className="a-line mt-4 max-w-xl text-muted">
-        FieldVault is the walkdown. Aether is the cortex — you can watch the mind fire.
+        FieldVault is the walkdown — open the live capture at /apps/fieldvault/play. Aether is the cortex.
       </p>
       <ul className="mt-14 divide-y divide-border border-y border-border">
         {WORK.map((w) => (

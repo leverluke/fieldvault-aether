@@ -20,6 +20,7 @@
     </div>
   </header>
 
+  <div id="fv-gps-banner" class="fv-gps-banner hidden">Location is off. Pins will not map. <button type="button" id="btn-gps-retry" class="btn-secondary btn-sm">Try GPS</button></div>
   <div id="search-bar" class="search-bar hidden">
     <input type="search" id="search-input" placeholder="Search visits, tags, areas…" autocomplete="off">
     <button id="btn-clear-search" class="btn-icon">×</button>
@@ -31,29 +32,27 @@
       <div id="coach-card" class="coach-card">
         <h2>How a site visit works</h2>
         <ol class="coach-steps">
-          <li><strong>Create a visit</strong> for this plant or unit.</li>
-          <li><strong>Add equipment</strong> as you walk — a pump, tank, valve, pipe.</li>
-          <li><strong>Take the photos</strong> we list. Start with a wide shot and the nameplate.</li>
+          <li><strong>Snap</strong> as you walk. GPS pins with the photo.</li>
+          <li><strong>Name a tag</strong> when you can — or say it while the camera is open.</li>
+          <li><strong>Punch list</strong> before you leave so the office is not chasing shots.</li>
         </ol>
         <button type="button" id="btn-coach-dismiss" class="btn-primary">Got it</button>
       </div>
       <div id="mode-banner" class="mode-banner">
-        <div class="mode-switch" role="group" aria-label="Product mode">
-          <button type="button" id="btn-mode-commercial" class="mode-btn active">Commercial</button>
-          <button type="button" id="btn-mode-defense" class="mode-btn">Defense</button>
-        </div>
         <p id="mode-banner-text">Oil & gas field notes — photograph equipment, tag it, and leave with a client-ready package.</p>
       </div>
+      <div id="rush-hero" class="rush-hero hidden"></div>
+      <div id="facility-home" class="facility-home hidden"></div>
       <div id="visits-empty" class="empty-state hidden">
         <div class="empty-icon" aria-hidden="true">
           <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>
         </div>
-        <h2 id="visits-empty-title">Start your first site visit</h2>
-        <p id="visits-empty-body">Walk the unit, snap photos of what you see, and FieldVault will help you organize them for the office.</p>
+        <h2 id="visits-empty-title">Start walking</h2>
+        <p id="visits-empty-body">Snap first. We start a visit, pin GPS, and you can name tags when you catch your breath.</p>
         <button id="btn-empty-new" class="btn-primary btn-lg">Create First Visit</button>
       </div>
       <div id="visits-list" class="card-list"></div>
-      <div class="home-tools">
+      <div class="home-tools hidden" id="home-tools">
         <button id="btn-backup" class="btn-secondary">Backup Data</button>
         <label for="restore-input" class="btn-secondary">Restore Backup</label>
         <input type="file" id="restore-input" accept="application/json" hidden>
@@ -62,6 +61,14 @@
 
     <section id="view-visit-detail" class="view">
       <div class="detail-header" id="visit-detail-header"></div>
+      <div id="walk-hud" class="walk-hud hidden">
+        <div class="walk-hud-copy">
+          <p class="walk-hud-kicker">This walk</p>
+          <p id="walk-hud-text">Finding the next gap…</p>
+          <p id="walk-hud-compass" class="walk-hud-compass hidden"></p>
+        </div>
+        <svg id="walk-mini-map" class="walk-mini-map" viewBox="0 0 160 100" aria-hidden="true"></svg>
+      </div>
       <div id="completeness-card" class="completeness-card hidden">
         <div class="completeness-header">
           <span class="completeness-title" id="completeness-title-text">How complete is this visit?</span>
@@ -72,21 +79,21 @@
         <button id="btn-ready-check" class="btn-secondary btn-sm" style="margin-top:10px;width:100%">What's missing?</button>
       </div>
       <div class="action-grid" id="visit-action-grid">
-        <button type="button" class="action-tile primary" id="tile-add-eq">
-          <span class="action-title">Add equipment</span>
-          <span class="action-sub">Pump, valve, tank, pipe…</span>
+        <button type="button" class="action-tile snap-hero" id="tile-quick">
+          <span class="action-title">Snap</span>
+          <span class="action-sub">Camera + GPS. Name it later.</span>
         </button>
-        <button type="button" class="action-tile" id="tile-quick">
-          <span class="action-title">Snap photos</span>
-          <span class="action-sub">Shoot first, assign later</span>
+        <button type="button" class="action-tile" id="tile-missing">
+          <span class="action-title">Punch list</span>
+          <span class="action-sub">Names, dark shots, GPS</span>
         </button>
         <button type="button" class="action-tile" id="tile-map">
           <span class="action-title">Map</span>
-          <span class="action-sub">See pins & what’s nearby</span>
+          <span class="action-sub">You, last pin, next gap</span>
         </button>
-        <button type="button" class="action-tile" id="tile-missing">
-          <span class="action-title">What’s missing?</span>
-          <span class="action-sub">Check before you leave</span>
+        <button type="button" class="action-tile" id="tile-add-eq">
+          <span class="action-title">Name a tag</span>
+          <span class="action-sub">If you already know it</span>
         </button>
       </div>
       <div class="visit-tools">
@@ -111,10 +118,15 @@
       <div id="eq-type-filter" class="chip-group eq-filter"></div>
       <div id="equipment-list" class="card-list"></div>
       <div class="detail-actions">
-        <button id="btn-export-package" class="btn-primary">Export Package</button>
-        <button id="btn-generate-pdf" class="btn-secondary">Generate Report</button>
+        <button id="btn-leave-site" class="btn-primary btn-lg">Leave site — send to client</button>
+        <button id="btn-send-client" class="btn-primary">Send to client</button>
+        <button id="btn-handoff" class="btn-secondary">Pass to truck</button>
+        <button id="btn-walk-again" class="btn-secondary">Walk again</button>
         <button id="btn-edit-visit" class="btn-secondary">Edit Visit</button>
         <button id="btn-delete-visit" class="btn-danger">Delete Visit</button>
+        <button id="btn-export-package" class="hidden" tabindex="-1">Export Package</button>
+        <button id="btn-share-package" class="hidden" tabindex="-1">Share</button>
+        <button id="btn-generate-pdf" class="hidden" tabindex="-1">Generate Report</button>
       </div>
     </section>
 
@@ -260,7 +272,7 @@
       </div>
       <div class="qc-actions">
         <label for="qc-photo-input" class="btn-primary btn-lg">Take / Add Photos</label>
-        <input type="file" id="qc-photo-input" accept="image/*" capture="environment" hidden multiple>
+        <input type="file" id="qc-photo-input" accept="image/*,image/heic,image/heif,.heic,.heif" capture="environment" hidden multiple>
       </div>
       <div id="qc-preview" class="qc-preview"></div>
       <div class="detail-actions">
@@ -348,6 +360,9 @@
     </section>
 
     <section id="view-map" class="view">
+      <div id="map-walk-hud" class="walk-hud map-walk-hud hidden">
+        <p id="map-walk-hud-text">Walk the next gap</p>
+      </div>
       <div class="map-toolbar">
         <button id="btn-map-satellite" class="btn-secondary btn-sm active">Satellite</button>
         <button id="btn-map-street" class="btn-secondary btn-sm">Street</button>
@@ -383,19 +398,65 @@
 
     <section id="view-ready-check" class="view">
       <div class="detail-header">
-        <h2 id="ready-check-title">What's missing?</h2>
-        <p class="meta" id="ready-check-meta">Finish these before you leave the site so the office isn't chasing photos later.</p>
+        <h2 id="ready-check-title">Punch list</h2>
+        <p class="meta" id="ready-check-meta">Name untitled pins, retake dark shots, then leave with the package.</p>
       </div>
       <div id="ready-list" class="card-list"></div>
       <div class="detail-actions">
-        <button id="btn-ready-done" class="btn-primary">Back to Visit</button>
+        <button id="btn-leave-site-ready" class="btn-primary btn-lg">Leave site — send to client</button>
+        <button id="btn-ready-done" class="btn-secondary">Back to Visit</button>
       </div>
     </section>
   </main>
 
   <div id="sticky-next" class="sticky-next hidden">
     <div id="sticky-next-copy"></div>
-    <button type="button" id="btn-sticky-take" class="btn-primary btn-sm">Take</button>
+    <button type="button" id="btn-sticky-take" class="btn-shutter" aria-label="Take photo">Snap</button>
+  </div>
+
+  <div id="fv-camera" class="fv-camera hidden" aria-hidden="true">
+    <video id="fv-cam-video" playsinline muted autoplay></video>
+    <div class="fv-cam-top">
+      <button type="button" id="fv-cam-done" class="fv-cam-textbtn">Done</button>
+      <div id="fv-cam-gps" class="fv-cam-chip">GPS…</div>
+      <div id="fv-cam-count" class="fv-cam-chip">0</div>
+      <button type="button" id="fv-cam-torch" class="fv-cam-chip fv-cam-chip-btn hidden" aria-pressed="false">Light</button>
+    </div>
+    <div id="fv-cam-listen" class="fv-cam-listen">Listening for a tag…</div>
+    <div id="fv-cam-hint" class="fv-cam-hint">Stand at the asset. Snap. Keep walking.</div>
+    <div id="fv-cam-attach" class="fv-cam-attach"></div>
+    <div id="fv-cam-issues" class="fv-cam-issues">
+      <button type="button" class="fv-cam-issue" data-issue="leak">Leak</button>
+      <button type="button" class="fv-cam-issue" data-issue="notag">No tag</button>
+      <button type="button" class="fv-cam-issue" data-issue="blocked">Blocked</button>
+    </div>
+    <div class="fv-cam-dock">
+      <button type="button" id="fv-cam-name" class="fv-cam-textbtn">Name</button>
+      <button type="button" id="fv-cam-shutter" class="fv-cam-shutter" aria-label="Shutter"></button>
+      <button type="button" id="fv-cam-newpin" class="fv-cam-textbtn">New pin</button>
+    </div>
+  </div>
+
+  <div id="modal-name-pin" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header"><h2>Name this pin</h2><button class="btn-icon" id="btn-name-pin-close" aria-label="Close">×</button></div>
+      <div class="modal-body">
+        <p class="help-text" id="name-pin-meta">Last shot is on an untitled pin. Type the tag or say it.</p>
+        <div class="form-section">
+          <label>Tag / name</label>
+          <div class="input-with-voice">
+            <input type="text" id="name-pin-tag" placeholder="e.g. P-101 or Charge pump" enterkeyhint="done" autocomplete="off">
+            <button type="button" class="btn-voice" id="btn-voice-name-pin" aria-label="Say the tag">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><path d="M12 18v3"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" id="btn-name-pin-skip">Later</button>
+        <button class="btn-primary" id="btn-name-pin-save">Save name</button>
+      </div>
+    </div>
   </div>
 
   <div id="more-sheet" class="more-sheet hidden">
@@ -406,8 +467,12 @@
         <button type="button" class="btn-icon" id="btn-more-close" aria-label="Close">×</button>
       </div>
       <button type="button" class="more-item" id="more-highvis">High visibility</button>
-      <button type="button" class="more-item" id="more-defense">Defense mode (advanced)</button>
+      <button type="button" class="more-item" id="more-defense">Defense / twin mode (advanced)</button>
       <button type="button" class="more-item" id="more-modeling">Modeling mode</button>
+      <button type="button" class="more-item" id="more-install">Add to Home Screen</button>
+      <button type="button" class="more-item" id="more-handoff">Pass visit to another phone</button>
+      <button type="button" class="more-item" id="more-export">Export ZIP (office)</button>
+      <button type="button" class="more-item" id="more-pdf">PDF report (office)</button>
       <button type="button" class="more-item" id="more-backup">Backup data</button>
       <label for="restore-input" class="more-item">Restore backup</label>
       <p class="help-text more-note">Oil & gas is the default. Defense mode is for modeling-ready capture if you need it later.</p>
@@ -420,7 +485,9 @@
       <div class="modal-body">
         <div class="form-section"><label id="visit-title-label">Visit Title <span class="required">*</span></label><input type="text" id="visit-title" enterkeyhint="done" autocomplete="off" placeholder="e.g. Crude unit walkdown – May 12"></div>
         <div class="form-section"><label>Client / Project</label><input type="text" id="visit-client" enterkeyhint="next" autocomplete="off" placeholder="Operator or project name"></div>
-        <div class="form-section"><label>Facility / unit</label><input type="text" id="visit-facility" enterkeyhint="next" autocomplete="off" placeholder="e.g. Bayou Refinery – Crude Unit"></div>
+        <div class="form-section"><label>Facility / unit</label><input type="text" id="visit-facility" enterkeyhint="next" autocomplete="off" placeholder="e.g. Bayou Refinery – Crude Unit">
+          <div id="facility-chips" class="chip-group facility-chips"></div>
+        </div>
         <div class="form-section"><label>Date</label><input type="date" id="visit-date"></div>
         <div class="form-section"><label id="visit-template-label">What kind of visit?</label>
           <div id="visit-kind-grid" class="kind-grid"></div>
@@ -464,6 +531,21 @@
       <div class="modal-footer">
         <button class="btn-secondary modal-close-area">Cancel</button>
         <button id="btn-save-area" class="btn-primary">Save Area</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal-handoff" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header"><h2>Pass to the truck</h2><button class="btn-icon" id="btn-handoff-close" aria-label="Close">×</button></div>
+      <div class="modal-body">
+        <p class="help-text">No account. Share one HTML file, or show the roster code. Photos go in the client ZIP.</p>
+        <img id="handoff-qr" class="handoff-qr" alt="Visit roster code">
+        <p id="handoff-line" class="handoff-line"></p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" id="btn-handoff-html">Share HTML pack</button>
+        <button class="btn-primary" id="btn-handoff-done">Done</button>
       </div>
     </div>
   </div>
