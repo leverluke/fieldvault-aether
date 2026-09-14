@@ -104,7 +104,14 @@ export function roundHeading(deg) {
 }
 
 export function photoHeading(photo, eq) {
-  return roundHeading(photo?.heading ?? eq?.heading);
+  const direct = roundHeading(photo?.heading ?? eq?.heading);
+  if (direct != null) return direct;
+  if (photo) return null;
+  for (const p of eq?.photos || []) {
+    const h = roundHeading(p.heading);
+    if (h != null) return h;
+  }
+  return null;
 }
 
 export function photoGpsAcc(photo, eq) {

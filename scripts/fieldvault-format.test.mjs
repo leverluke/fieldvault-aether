@@ -310,6 +310,11 @@ test("per-shot heading and gps_acc land on CSV, GeoJSON, and punch list without 
   assert.equal(photoFeat.properties.heading, 42);
   assert.equal(photoFeat.properties.gps_acc, 8);
   assert.equal(photoFeat.properties.pid, "P&ID-CU-101");
+  const eqOnly = { ...eq, heading: undefined };
+  const eqFeat = walkGeoJson({ title: "Crude" }, [eqOnly], [{ id: "pumps", name: "Pump area" }]).features.find(
+    (f) => f.properties.kind === "equipment",
+  );
+  assert.equal(eqFeat.properties.heading, 42);
 
   const weakReasons = officePassReasons(weak).map((r) => r.id);
   assert.ok(weakReasons.includes("weakgps"));
