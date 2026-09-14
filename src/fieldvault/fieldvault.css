@@ -1102,6 +1102,50 @@ body.defense-mode .app-header { background: #10161c; }
   font-size: 0.85rem;
   padding: 4px 0 10px;
 }
+.coverage-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin: 12px 0 8px;
+}
+.coverage-kicker {
+  margin: 0 0 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.coverage-line {
+  margin: 0 0 6px;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+.coverage-line strong { color: var(--text); font-weight: 600; }
+.coverage-sub {
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 14px 0 8px;
+}
+.area-day-row { margin-top: 10px; }
+.coverage-punch {
+  list-style: none;
+  margin: 8px 0 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.coverage-punch-item {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 6px 0;
+}
 .untitled-hint { color: var(--warning); font-weight: 600; }
 
 .fv-camera {
@@ -1166,6 +1210,58 @@ body.defense-mode .app-header { background: #10161c; }
   background: rgba(0,0,0,0.58);
   font-weight: 700;
   color: #fff;
+}
+.fv-cam-sheet {
+  position: relative;
+  z-index: 2;
+  margin: 8px 14px 0;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: rgba(0,0,0,0.72);
+}
+.fv-cam-sheet-copy {
+  margin: 0 0 8px;
+  font-size: 0.82rem;
+  color: #d5dde3;
+  text-align: center;
+}
+.fv-cam-sheet-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+.fv-cam-sheet-actions .fv-cam-textbtn {
+  min-height: 44px;
+  min-width: 0;
+  flex: 1;
+  font-size: 0.85rem;
+}
+.plan-pin-stage {
+  position: relative;
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg);
+  min-height: 180px;
+  cursor: crosshair;
+}
+.plan-pin-stage img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 52vh;
+  object-fit: contain;
+}
+.plan-pin-dot {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  margin: -8px 0 0 -8px;
+  border-radius: 50%;
+  background: #e07a5f;
+  border: 2px solid #fff;
+  pointer-events: none;
 }
 .fv-cam-textbtn {
   min-height: 56px;

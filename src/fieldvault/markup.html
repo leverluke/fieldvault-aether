@@ -111,6 +111,7 @@
         </div>
       </div>
       <div id="areas-list" class="card-list"></div>
+      <div id="coverage-card" class="coverage-card hidden"></div>
       <div class="section-title-row" style="margin-top:24px">
         <h2 id="equipment-heading">Equipment you documented</h2>
         <button id="btn-add-equipment" class="btn-primary btn-sm">+ Equipment</button>
@@ -120,6 +121,7 @@
       <div class="detail-actions">
         <button id="btn-leave-site" class="btn-primary btn-lg">Leave site — send to client</button>
         <button id="btn-send-client" class="btn-primary">Send to client</button>
+        <button id="btn-export-drawings" class="btn-secondary">For drawings</button>
         <button id="btn-handoff" class="btn-secondary">Pass to truck</button>
         <button id="btn-walk-again" class="btn-secondary">Walk again</button>
         <button id="btn-edit-visit" class="btn-secondary">Edit Visit</button>
@@ -138,6 +140,7 @@
       </div>
       <div id="area-equipment-list" class="card-list"></div>
       <div class="detail-actions">
+        <button type="button" id="btn-area-day1" class="btn-secondary">Mark Day 1 done</button>
         <button id="btn-edit-area" class="btn-secondary">Edit Area</button>
         <button id="btn-delete-area" class="btn-danger">Delete Area</button>
       </div>
@@ -220,6 +223,14 @@
           <div class="form-section">
             <label>P&ID / drawing number</label>
             <input type="text" id="eq-pid" placeholder="e.g. P&ID-12-041">
+          </div>
+          <div class="form-section">
+            <label>Sheet + grid (optional)</label>
+            <div class="coords-row" style="grid-template-columns:1fr 1fr">
+              <input type="text" id="eq-sheet" placeholder="Sheet / P&ID" autocomplete="off">
+              <input type="text" id="eq-grid" placeholder="Grid e.g. C-4" autocomplete="off">
+            </div>
+            <p class="help-text">Skip anytime. GPS and tags still stand on their own.</p>
           </div>
           <div class="form-section">
             <label>Line number</label>
@@ -425,6 +436,14 @@
     <div id="fv-cam-listen" class="fv-cam-listen">Listening for a tag…</div>
     <div id="fv-cam-hint" class="fv-cam-hint">Stand at the asset. Snap. Keep walking.</div>
     <div id="fv-cam-attach" class="fv-cam-attach"></div>
+    <div id="fv-cam-sheet" class="fv-cam-sheet hidden">
+      <p class="fv-cam-sheet-copy">Pin on drawing? Optional. Skip keeps GPS + tags.</p>
+      <div class="fv-cam-sheet-actions">
+        <button type="button" id="fv-cam-sheet-skip" class="fv-cam-textbtn">Skip</button>
+        <button type="button" id="fv-cam-sheet-type" class="fv-cam-textbtn">Sheet</button>
+        <button type="button" id="fv-cam-sheet-plan" class="fv-cam-textbtn">PDF</button>
+      </div>
+    </div>
     <div id="fv-cam-issues" class="fv-cam-issues">
       <button type="button" class="fv-cam-issue" data-issue="leak">Leak</button>
       <button type="button" class="fv-cam-issue" data-issue="notag">No tag</button>
@@ -472,6 +491,7 @@
       <button type="button" class="more-item" id="more-install">Add to Home Screen</button>
       <button type="button" class="more-item" id="more-handoff">Pass visit to another phone</button>
       <button type="button" class="more-item" id="more-export">Export ZIP (office)</button>
+      <button type="button" class="more-item" id="more-drawings">For drawings</button>
       <button type="button" class="more-item" id="more-pdf">PDF report (office)</button>
       <button type="button" class="more-item" id="more-backup">Backup data</button>
       <label for="restore-input" class="more-item">Restore backup</label>
@@ -610,6 +630,55 @@
       <div class="modal-footer">
         <button id="btn-ai-use-note" class="btn-secondary">Add to photo note</button>
         <button class="btn-primary modal-close-ai-result">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal-sheet-pin" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header"><h2>Sheet + grid</h2><button type="button" class="btn-icon" id="btn-sheet-pin-close" aria-label="Close">×</button></div>
+      <div class="modal-body">
+        <p class="help-text">Optional. Skip keeps GPS and tags only. Same visit — no new pin.</p>
+        <div class="form-section">
+          <label>Sheet / P&amp;ID</label>
+          <input type="text" id="sheet-pin-name" placeholder="e.g. P&amp;ID-CU-101" enterkeyhint="next" autocomplete="off">
+        </div>
+        <div class="form-section">
+          <label>Grid</label>
+          <input type="text" id="sheet-pin-grid" placeholder="e.g. C-4" enterkeyhint="done" autocomplete="off">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn-secondary" id="btn-sheet-pin-skip">Skip</button>
+        <button type="button" class="btn-primary" id="btn-sheet-pin-save">Save on this shot</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal-plan-pin" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header"><h2>Pin on plan</h2><button type="button" class="btn-icon" id="btn-plan-pin-close" aria-label="Close">×</button></div>
+      <div class="modal-body">
+        <p class="help-text">Attach a PDF or a photo of the drawing. Tap an image to drop the pin. PDF stays on the visit — type sheet + grid.</p>
+        <input type="file" id="plan-pin-file" accept="application/pdf,image/*,.pdf" hidden>
+        <button type="button" class="btn-secondary" id="btn-plan-pin-pick">Attach PDF or photo</button>
+        <p id="plan-pin-file-name" class="help-text"></p>
+        <div id="plan-pin-stage" class="plan-pin-stage hidden">
+          <img id="plan-pin-img" alt="Drawing">
+          <span id="plan-pin-dot" class="plan-pin-dot hidden"></span>
+        </div>
+        <div class="form-section" style="margin-top:12px">
+          <label>Sheet / P&amp;ID</label>
+          <input type="text" id="plan-pin-sheet" placeholder="e.g. P&amp;ID-CU-101" autocomplete="off">
+        </div>
+        <div class="form-section">
+          <label>Grid</label>
+          <input type="text" id="plan-pin-grid" placeholder="e.g. C-4" autocomplete="off">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn-secondary" id="btn-plan-pin-skip">Skip</button>
+        <button type="button" class="btn-primary" id="btn-plan-pin-save">Save on this shot</button>
       </div>
     </div>
   </div>

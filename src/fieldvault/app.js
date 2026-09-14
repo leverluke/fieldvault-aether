@@ -5,13 +5,20 @@ import {
   attachPreviewText,
   clusterByAccuracy,
   compareEquipmentWalkOrder,
-  csvCell,
+  coverageByArea,
+  coverageSummary,
+  equipmentCsv,
+  isAreaDay1Done,
   isUntitledTag,
   hasDarkPhoto,
+  leaveSiteBlockers,
   nextWalkGap,
   officePassItems,
   officePassReasons,
   parseSpokenName,
+  photoIndexCsv,
+  placeOnSheetNote,
+  roundHeading,
   rushShotType,
   suggestAttachTarget,
   uniqueFacilities,
@@ -71,6 +78,9 @@ let torchOn = false;
 let headingDeg = null;
 let lastPhotoHash = null;
 let lastSpokenAt = 0;
+let lastSheetPhotoId = null;
+let planPinXY = null;
+let planPinDrawing = null;
 
 const COPY = {
   commercial: {
@@ -548,11 +558,176 @@ export function closeFieldCameraUi() {
   document.body.classList.remove('fv-cam-open');
   const video = $('fv-cam-video');
   if (video) video.srcObject = null;
+  hideSheetPinChip();
   renderStickyNext(window.__fvCurrentPhotos || []);
 }
 
 function updateCamAttach(text) {
   if ($('fv-cam-attach')) $('fv-cam-attach').textContent = text || '';
+}
+
+function hideSheetPinChip() {
+  $('fv-cam-sheet')?.classList.add('hidden');
+}
+
+function showSheetPinChip() {
+  const el = $('fv-cam-sheet');
+  if (!el) return;
+  el.classList.remove('hidden');
+}
+
+function closeSheetPinModals() {
+  $('modal-sheet-pin')?.classList.add('hidden');
+  $('modal-plan-pin')?.classList.add('hidden');
+  hideSheetPinChip();
+}
+
+function prefillSheetFields() {
+  const pid = $('eq-pid')?.value?.trim() || '';
+  if ($('sheet-pin-name') && !$('sheet-pin-name').value) $('sheet-pin-name').value = pid;
+  if ($('plan-pin-sheet') && !$('plan-pin-sheet').value) $('plan-pin-sheet').value = pid;
+}
+
+async function openSheetPinModal() {
+  if (!lastCapturedEqId && !currentEquipmentId) {
+    showToast('Snap first, then pin the sheet');
+    return;
+  }
+  hideSheetPinChip();
+  prefillSheetFields();
+  const eq = await dbGet(STORE_EQUIPMENT, lastCapturedEqId || currentEquipmentId);
+  if (eq?.pid && $('sheet-pin-name') && !$('sheet-pin-name').value) $('sheet-pin-name').value = eq.pid;
+  if (eq?.sheet?.sheet && $('sheet-pin-name')) $('sheet-pin-name').value = eq.sheet.sheet;
+  if (eq?.sheet?.grid && $('sheet-pin-grid')) $('sheet-pin-grid').value = eq.sheet.grid;
+  $('modal-sheet-pin')?.classList.remove('hidden');
+}
+
+async function openPlanPinModal() {
+  if (!lastCapturedEqId && !currentEquipmentId) {
+    showToast('Snap first, then pin the drawing');
+    return;
+  }
+  hideSheetPinChip();
+  prefillSheetFields();
+  planPinXY = null;
+  planPinDrawing = null;
+  $('plan-pin-file-name').textContent = '';
+  $('plan-pin-stage')?.classList.add('hidden');
+  $('plan-pin-dot')?.classList.add('hidden');
+  const eq = await dbGet(STORE_EQUIPMENT, lastCapturedEqId || currentEquipmentId);
+  if (eq?.pid && $('plan-pin-sheet') && !$('plan-pin-sheet').value) $('plan-pin-sheet').value = eq.pid;
+  if (eq?.sheet?.sheet && $('plan-pin-sheet')) $('plan-pin-sheet').value = eq.sheet.sheet;
+  if (eq?.sheet?.grid && $('plan-pin-grid')) $('plan-pin-grid').value = eq.sheet.grid;
+  $('modal-plan-pin')?.classList.remove('hidden');
+}
+
+async function applySheetLocation(loc) {
+  const id = lastCapturedEqId || currentEquipmentId;
+  if (!id) { showToast('Snap first'); return false; }
+  const eq = await dbGet(STORE_EQUIPMENT, id);
+  if (!eq) return false;
+  const sheet = {
+    sheet: String(loc.sheet || '').trim(),
+    grid: String(loc.grid || '').trim(),
+    drawingId: loc.drawingId || '',
+    x: loc.x,
+    y: loc.y
+  };
+  const photos = eq.photos || [];
+  const last = photos.find((p) => p.id === lastSheetPhotoId) || photos[photos.length - 1];
+  if (last) last.sheet = sheet;
+  eq.sheet = sheet;
+  if (!eq.pid && sheet.sheet) eq.pid = sheet.sheet;
+  eq.updatedAt = Date.now();
+  await dbPut(STORE_EQUIPMENT, eq);
+  if ($('eq-sheet')) $('eq-sheet').value = sheet.sheet;
+  if ($('eq-grid')) $('eq-grid').value = sheet.grid;
+  if ($('eq-pid') && eq.pid) $('eq-pid').value = eq.pid;
+  return true;
+}
+
+async function saveTypedSheetPin() {
+  const sheet = $('sheet-pin-name')?.value.trim() || '';
+  const grid = $('sheet-pin-grid')?.value.trim() || '';
+  if (!sheet && !grid) { showToast('Type a sheet or skip'); return; }
+  const ok = await applySheetLocation({ sheet, grid });
+  if (!ok) return;
+  $('modal-sheet-pin')?.classList.add('hidden');
+  showToast('Pinned to ' + [sheet, grid].filter(Boolean).join(' '));
+}
+
+async function pickPlanFile(file) {
+  if (!file || !currentVisitId) return;
+  const rec = await attachVisitDrawing(file);
+  planPinDrawing = rec;
+  $('plan-pin-file-name').textContent = rec.name || file.name;
+  const isImage = /^image\//.test(file.type);
+  const stage = $('plan-pin-stage');
+  const img = $('plan-pin-img');
+  if (isImage && img && stage) {
+    img.src = URL.createObjectURL(file);
+    stage.classList.remove('hidden');
+    $('plan-pin-dot')?.classList.add('hidden');
+    planPinXY = null;
+  } else {
+    stage?.classList.add('hidden');
+    showToast('PDF stored on this visit — type sheet + grid');
+  }
+}
+
+async function attachVisitDrawing(file) {
+  const visit = await dbGet(STORE_VISITS, currentVisitId);
+  if (!visit) throw new Error('no visit');
+  const blobId = await putPhotoBlob(file, file.type || 'application/pdf');
+  const rec = {
+    id: uuid(),
+    name: file.name || 'drawing',
+    blobId,
+    mime: file.type || 'application/octet-stream',
+    createdAt: Date.now()
+  };
+  visit.drawings = visit.drawings || [];
+  visit.drawings.push(rec);
+  visit.updatedAt = Date.now();
+  await dbPut(STORE_VISITS, visit);
+  return rec;
+}
+
+function markPlanTap(ev) {
+  const stage = $('plan-pin-stage');
+  if (!stage || stage.classList.contains('hidden')) return;
+  const rect = stage.getBoundingClientRect();
+  const x = (ev.clientX - rect.left) / Math.max(1, rect.width);
+  const y = (ev.clientY - rect.top) / Math.max(1, rect.height);
+  planPinXY = {
+    x: Math.max(0, Math.min(1, x)),
+    y: Math.max(0, Math.min(1, y))
+  };
+  const dot = $('plan-pin-dot');
+  if (dot) {
+    dot.style.left = (planPinXY.x * 100) + '%';
+    dot.style.top = (planPinXY.y * 100) + '%';
+    dot.classList.remove('hidden');
+  }
+}
+
+async function savePlanPin() {
+  const sheet = $('plan-pin-sheet')?.value.trim() || '';
+  const grid = $('plan-pin-grid')?.value.trim() || '';
+  if (!sheet && !grid && !planPinDrawing && !planPinXY) {
+    showToast('Attach a plan, type a sheet, or skip');
+    return;
+  }
+  const ok = await applySheetLocation({
+    sheet,
+    grid,
+    drawingId: planPinDrawing?.id || '',
+    x: planPinXY ? planPinXY.x : undefined,
+    y: planPinXY ? planPinXY.y : undefined
+  });
+  if (!ok) return;
+  $('modal-plan-pin')?.classList.add('hidden');
+  showToast(sheet || grid ? 'Pinned on drawing' : 'Plan stored on this visit');
 }
 
 function startCamListen() {
@@ -747,8 +922,11 @@ function buzz() {
 
 async function shutterFieldCamera() {
   if (!cameraOpen || camBusy) return;
+  if (!$('modal-sheet-pin')?.classList.contains('hidden')) return;
+  if (!$('modal-plan-pin')?.classList.contains('hidden')) return;
   const video = $('fv-cam-video');
   if (!video) return;
+  hideSheetPinChip();
   camBusy = true;
   try {
     buzz();
@@ -781,6 +959,7 @@ async function shutterFieldCamera() {
       persistSession();
       updateCamAttach(result.message);
       showToast(result.message);
+      showSheetPinChip();
     }
   } catch (err) {
     console.error(err);
@@ -866,9 +1045,12 @@ async function addPhotoToEquipment(eq, shot) {
     lng: shot.exif?.lng ?? lastFix?.lng ?? null,
     gpsAcc: shot.exif?.acc ?? lastFix?.acc,
     source: shot.exif ? 'exif' : (lastFix ? 'gps' : null),
+    heading: roundHeading(headingDeg),
     capturedAt: Date.now()
   };
+  lastSheetPhotoId = rec.id;
   eq.photos.push(rec);
+  if (rec.heading != null && eq.heading == null) eq.heading = rec.heading;
   if ((shot.exif || lastFix) && eq.lat == null) {
     const fix = shot.exif || lastFix;
     eq.lat = fix.lat;
@@ -2162,6 +2344,110 @@ async function walkAgainFrom(visitId) {
   refreshNearest();
 }
 
+function areaHasEquipment(area, equipment) {
+  return equipment.some((e) => e.areaId === area.id);
+}
+
+function areaCoverageCardHtml(a, equipment, planUsed) {
+  const count = equipment.filter((e) => e.areaId === a.id).length;
+  const done = isAreaDay1Done(a);
+  const badge = planUsed
+    ? (done ? '<span class="badge ok">Day 1 done</span>' : '<span class="badge warn">Day 2</span>')
+    : '';
+  const btn = done ? 'Keep for Day 2' : 'Day 1 done';
+  return `<div class="card" data-id="${a.id}">
+    <div class="card-title">${escapeHtml(a.name)}${badge}</div>
+    <div class="card-meta"><span>${count} equipment</span></div>
+    <div class="area-day-row">
+      <button type="button" class="btn-secondary btn-sm area-day1-btn" data-id="${a.id}" data-done="${done ? '1' : '0'}">${btn}</button>
+    </div>
+  </div>`;
+}
+
+function emptyAreasNoteHtml(emptyAreas) {
+  if (!emptyAreas.length) return '';
+  if (!showEmptyAreas) {
+    return `<p class="area-hidden-note">${emptyAreas.length} unused area${emptyAreas.length === 1 ? '' : 's'} hidden. <button type="button" class="btn-secondary btn-sm" id="btn-show-empty-areas">Show</button></p>`;
+  }
+  return '<p class="area-hidden-note"><button type="button" class="btn-secondary btn-sm" id="btn-hide-empty-areas">Hide unused areas</button></p>';
+}
+
+function bindVisitAreaList(areasList, visitId) {
+  areasList.querySelectorAll('.card').forEach((c) => {
+    c.addEventListener('click', (ev) => {
+      if (ev.target.closest('button')) return;
+      currentAreaId = c.dataset.id;
+      showView('view-area-detail');
+      loadAreaDetail(currentAreaId);
+    });
+  });
+  areasList.querySelectorAll('.area-day1-btn').forEach((b) => {
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      void toggleAreaDay1(b.dataset.id, b.dataset.done !== '1');
+    });
+  });
+  $('btn-show-empty-areas')?.addEventListener('click', () => {
+    showEmptyAreas = true;
+    loadVisitDetail(visitId);
+  });
+  $('btn-hide-empty-areas')?.addEventListener('click', () => {
+    showEmptyAreas = false;
+    loadVisitDetail(visitId);
+  });
+}
+
+function renderCoverageCard(plan, areas) {
+  const el = $('coverage-card');
+  if (!el) return;
+  if (!plan || !plan.used) {
+    el.classList.add('hidden');
+    el.innerHTML = '';
+    return;
+  }
+  el.classList.remove('hidden');
+  const names = (list) => (list || []).map((a) => escapeHtml(a.name || 'Area')).join(', ') || 'none';
+  const punch = plan.punchOpen || [];
+  const punchLines = punch.slice(0, 8).map((eq) => {
+    const areaName = (areas.find((a) => a.id === eq.areaId) || {}).name;
+    const reasons = officePassReasons(eq).map((r) => r.label).slice(0, 2).join(' · ');
+    return `<li class="coverage-punch-item" data-id="${eq.id}"><span class="tag-badge">${escapeHtml(eq.tag || '?')}</span>${areaName ? ' · ' + escapeHtml(areaName) : ''} · ${escapeHtml(reasons)}</li>`;
+  }).join('');
+  const extra = punch.length > 8 ? `<li class="coverage-line">…${punch.length - 8} more</li>` : '';
+  el.innerHTML = `
+    <p class="coverage-kicker">Same visit · two days</p>
+    <p class="coverage-line">${escapeHtml(coverageSummary(plan))}</p>
+    <p class="coverage-line"><strong>Day 1 done:</strong> ${names(plan.day1Done)}</p>
+    <p class="coverage-line"><strong>Day 2 remaining:</strong> ${names(plan.day2Remaining)}</p>
+    <p class="coverage-line"><strong>Open punch items</strong> stay on this visit${punch.length ? ':' : '.'}</p>
+    ${punch.length ? `<ul class="coverage-punch">${punchLines}${extra}</ul>` : ''}
+    <button type="button" class="btn-secondary btn-sm" id="btn-coverage-punch">Punch list</button>
+  `;
+  $('btn-coverage-punch')?.addEventListener('click', () => openReadyCheck());
+  el.querySelectorAll('.coverage-punch-item').forEach((li) => {
+    li.addEventListener('click', () => {
+      currentEquipmentId = li.dataset.id;
+      showView('view-equipment-detail');
+      loadEquipmentDetail(currentEquipmentId);
+    });
+  });
+}
+
+async function toggleAreaDay1(id, done) {
+  const area = await dbGet(STORE_AREAS, id);
+  if (!area) return;
+  area.day1Done = !!done;
+  if (done) area.day1DoneAt = Date.now();
+  else delete area.day1DoneAt;
+  area.updatedAt = Date.now();
+  await dbPut(STORE_AREAS, area);
+  showToast(done
+    ? 'Day 1 done — remaining areas and punch items stay on this visit'
+    : 'Area is on Day 2 remaining');
+  if (currentView === 'view-area-detail' && currentAreaId === id) loadAreaDetail(id);
+  else if (currentVisitId) loadVisitDetail(currentVisitId);
+}
+
 async function loadVisitDetail(id) {
   const visit = await dbGet(STORE_VISITS, id);
   if (!visit) { showView('view-visits'); return; }
@@ -2182,42 +2468,37 @@ async function loadVisitDetail(id) {
   renderCompleteness(equipment);
   void refreshWalkHud();
 
+  const punchForCoverage = equipment.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) }));
+  const plan = coverageByArea(areas, punchForCoverage);
   const areasList = $('areas-list');
-  const filledAreas = areas.filter((a) => equipment.some((e) => e.areaId === a.id));
-  const emptyAreas = areas.filter((a) => !equipment.some((e) => e.areaId === a.id));
+  const filledAreas = areas.filter((a) => areaHasEquipment(a, equipment));
+  const emptyAreas = areas.filter((a) => !areaHasEquipment(a, equipment));
   const areasToShow = showEmptyAreas ? areas : filledAreas;
   if (areas.length === 0) {
     areasList.innerHTML = '<p style="color:var(--text-muted);font-size:0.9rem;padding:8px 0">No areas yet. Use + Area, or we can suggest groups from GPS after you pin equipment.</p>';
+    renderCoverageCard(null, areas);
   } else {
-    let html = areasToShow.map(a => {
-      const count = equipment.filter(e => e.areaId === a.id).length;
-      return `<div class="card" data-id="${a.id}">
-        <div class="card-title">${escapeHtml(a.name)}</div>
-        <div class="card-meta"><span>${count} equipment</span></div>
-      </div>`;
-    }).join('');
-    if (emptyAreas.length && !showEmptyAreas) {
-      html += `<p class="area-hidden-note">${emptyAreas.length} unused area${emptyAreas.length === 1 ? '' : 's'} hidden. <button type="button" class="btn-secondary btn-sm" id="btn-show-empty-areas">Show</button></p>`;
-    } else if (emptyAreas.length && showEmptyAreas) {
-      html += `<p class="area-hidden-note"><button type="button" class="btn-secondary btn-sm" id="btn-hide-empty-areas">Hide unused areas</button></p>`;
+    let html = '';
+    if (plan.used) {
+      const day2Shown = showEmptyAreas ? plan.day2Remaining : plan.day2Remaining.filter((a) => areaHasEquipment(a, equipment));
+      const emptyDay2 = plan.day2Remaining.filter((a) => !areaHasEquipment(a, equipment));
+      html += '<h3 class="coverage-sub">Day 1 done</h3>';
+      html += plan.day1Done.length
+        ? plan.day1Done.map((a) => areaCoverageCardHtml(a, equipment, true)).join('')
+        : '<p class="area-hidden-note">None yet.</p>';
+      html += '<h3 class="coverage-sub">Day 2 remaining</h3>';
+      html += day2Shown.length
+        ? day2Shown.map((a) => areaCoverageCardHtml(a, equipment, true)).join('')
+        : '<p class="area-hidden-note">No remaining areas in this list.</p>';
+      html += emptyAreasNoteHtml(emptyDay2);
+    } else {
+      html = areasToShow.map((a) => areaCoverageCardHtml(a, equipment, false)).join('');
+      html += emptyAreasNoteHtml(emptyAreas);
+      if (!html) html = '<p class="area-hidden-note">No equipment in an area yet.</p>';
     }
-    if (!html) html = '<p class="area-hidden-note">No equipment in an area yet.</p>';
     areasList.innerHTML = html;
-    areasList.querySelectorAll('.card').forEach(c => {
-      c.addEventListener('click', () => {
-        currentAreaId = c.dataset.id;
-        showView('view-area-detail');
-        loadAreaDetail(currentAreaId);
-      });
-    });
-    $('btn-show-empty-areas')?.addEventListener('click', () => {
-      showEmptyAreas = true;
-      loadVisitDetail(id);
-    });
-    $('btn-hide-empty-areas')?.addEventListener('click', () => {
-      showEmptyAreas = false;
-      loadVisitDetail(id);
-    });
+    bindVisitAreaList(areasList, id);
+    renderCoverageCard(plan, areas);
   }
 
   renderEqTypeFilter(equipment);
@@ -2400,7 +2681,7 @@ async function leaveSite(opts = {}) {
   if (!currentVisitId) { showToast('Open a visit first'); return; }
   const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
   const annotated = items.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) }));
-  const open = officePassItems(annotated);
+  const open = leaveSiteBlockers(annotated);
   if (open.length && !(opts && opts.force)) {
     showToast(open.length + ' still open — name or retake, then leave');
     openReadyCheck();
@@ -2411,8 +2692,12 @@ async function leaveSite(opts = {}) {
 
 async function deleteVisit() {
   if (!confirm('Delete this visit and all areas, equipment & photos?')) return;
+  const visit = await dbGet(STORE_VISITS, currentVisitId);
   const areas = await dbGetByIndex(STORE_AREAS, 'visitId', currentVisitId);
   const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
+  for (const d of visit?.drawings || []) {
+    if (d.blobId) await dbDelete(STORE_PHOTOS, d.blobId).catch(() => {});
+  }
   for (const a of areas) await dbDelete(STORE_AREAS, a.id);
   for (const e of items) {
     for (const p of e.photos || []) {
@@ -2462,7 +2747,12 @@ async function loadAreaDetail(id) {
   if (!area) { goBack(); return; }
   currentAreaId = id;
   $('header-title').textContent = area.name;
-  $('area-detail-header').innerHTML = `<h2>${escapeHtml(area.name)}</h2>${area.notes ? `<p class="meta">${escapeHtml(area.notes)}</p>` : ''}`;
+  const day1 = isAreaDay1Done(area);
+  $('area-detail-header').innerHTML = `<h2>${escapeHtml(area.name)}</h2>
+    ${day1 ? '<p class="meta">Day 1 done — open punch items stay on this visit for Day 2.</p>' : ''}
+    ${area.notes ? `<p class="meta">${escapeHtml(area.notes)}</p>` : ''}`;
+  const dayBtn = $('btn-area-day1');
+  if (dayBtn) dayBtn.textContent = day1 ? 'Keep for Day 2' : 'Mark Day 1 done';
   const equipment = await dbGetByIndex(STORE_EQUIPMENT, 'areaId', id);
   equipment.sort((a,b) => (a.tag||'').localeCompare(b.tag||''));
   const list = $('area-equipment-list');
@@ -2512,6 +2802,8 @@ async function openNewEquipment(fromArea=false) {
   $('eq-recommendation').value = '';
   if ($('eq-service')) $('eq-service').value = '';
   if ($('eq-pid')) $('eq-pid').value = '';
+  if ($('eq-sheet')) $('eq-sheet').value = '';
+  if ($('eq-grid')) $('eq-grid').value = '';
   if ($('eq-line')) $('eq-line').value = '';
   if ($('eq-mfr')) $('eq-mfr').value = '';
   if ($('eq-model')) $('eq-model').value = '';
@@ -2555,6 +2847,8 @@ async function loadEquipmentDetail(id) {
   selectedEqType = eq.eqType || 'other';
   if ($('eq-service')) $('eq-service').value = eq.service || '';
   if ($('eq-pid')) $('eq-pid').value = eq.pid || '';
+  if ($('eq-sheet')) $('eq-sheet').value = (eq.sheet && eq.sheet.sheet) || '';
+  if ($('eq-grid')) $('eq-grid').value = (eq.sheet && eq.sheet.grid) || '';
   if ($('eq-line')) $('eq-line').value = eq.lineNo || '';
   if ($('eq-mfr')) $('eq-mfr').value = eq.mfr || '';
   if ($('eq-model')) $('eq-model').value = eq.model || '';
@@ -2592,6 +2886,7 @@ async function renderPhotos(photos) {
     <div class="photo-thumb" data-id="${p.id}">
       <img src="${p._url || p.dataUrl || ''}" alt="">
       ${p.promptType ? `<div class="photo-type-badge">${escapeHtml(shotLabel(p.promptType, selectedEqType))}</div>` : ''}
+      ${p.sheet && (p.sheet.sheet || p.sheet.grid) ? `<div class="photo-note-badge">${escapeHtml([p.sheet.sheet, p.sheet.grid].filter(Boolean).join(' '))}</div>` : ''}
       ${p.note ? `<div class="photo-note-badge">${escapeHtml(p.note)}</div>` : ''}
     </div>
   `).join('');
@@ -2631,6 +2926,9 @@ async function saveEquipment(opts) {
   eq.eqType = selectedEqType || 'other';
   eq.service = $('eq-service') ? $('eq-service').value.trim() : '';
   eq.pid = $('eq-pid') ? $('eq-pid').value.trim() : '';
+  const sheetName = $('eq-sheet') ? $('eq-sheet').value.trim() : (eq.sheet && eq.sheet.sheet) || '';
+  const sheetGrid = $('eq-grid') ? $('eq-grid').value.trim() : (eq.sheet && eq.sheet.grid) || '';
+  eq.sheet = { ...(eq.sheet || {}), sheet: sheetName, grid: sheetGrid };
   eq.lineNo = $('eq-line') ? $('eq-line').value.trim() : '';
   eq.mfr = $('eq-mfr') ? $('eq-mfr').value.trim() : '';
   eq.model = $('eq-model') ? $('eq-model').value.trim() : '';
@@ -4014,6 +4312,41 @@ function safeName(s) {
   return String(s || 'item').replace(/[^a-z0-9._-]+/gi, '_').slice(0, 40);
 }
 
+function photoZipBinder(areaMap) {
+  let photoIdx = 1;
+  const paths = new Map();
+  return function fileForPhoto(eq, p) {
+    if (p?.id && paths.has(p.id)) return paths.get(p.id);
+    const areaName = areaMap[eq.areaId] || 'unassigned';
+    const folder = 'photos/' + safeName(areaName) + '/' + safeName(eq.tag);
+    const fname = safeName(eq.tag) + '_' + (p.promptType || 'photo') + '_' + photoIdx + '.jpg';
+    photoIdx += 1;
+    const path = folder + '/' + fname;
+    if (p?.id) paths.set(p.id, path);
+    return path;
+  };
+}
+
+async function zipPhotoFiles(zip, items, fileForPhoto) {
+  for (const eq of items) {
+    for (const p of eq.photos || []) {
+      const src = await photoDataUrl(p);
+      const data = (src || '').split(',')[1];
+      if (data) zip.file(fileForPhoto(eq, p), data, { base64: true });
+    }
+  }
+}
+
+async function zipVisitDrawings(zip, visit) {
+  for (const d of visit.drawings || []) {
+    const rec = d.blobId ? await dbGet(STORE_PHOTOS, d.blobId).catch(() => null) : null;
+    if (!rec?.blob) continue;
+    const ext = /\.pdf$/i.test(d.name || '') || /pdf/i.test(d.mime || '') ? '.pdf' : '.jpg';
+    const fname = 'drawings/' + safeName(d.name || 'plan') + (/\.[a-z0-9]+$/i.test(d.name || '') ? '' : ext);
+    zip.file(fname, rec.blob);
+  }
+}
+
 async function exportVisitPackage(opts = {}) {
   if (typeof JSZip === 'undefined') { showToast('ZIP library not loaded'); return; }
   const visit = await dbGet(STORE_VISITS, currentVisitId);
@@ -4024,7 +4357,8 @@ async function exportVisitPackage(opts = {}) {
 
   const zip = new JSZip();
   const areaMap = Object.fromEntries(areas.map(a => [a.id, a.name]));
-  const rows = [];
+  const scored = items.map((e) => ({ ...e, readiness: equipmentReadiness(e) }));
+  const fileForPhoto = photoZipBinder(areaMap);
   const meta = {
     visit,
     areas,
@@ -4036,6 +4370,8 @@ async function exportVisitPackage(opts = {}) {
       mfr: e.mfr || '', model: e.model || '', serial: e.serial || '',
       area: areaMap[e.areaId] || '',
       locationDesc: e.locationDesc, lat: e.lat, lng: e.lng,
+      gpsAcc: e.gpsAcc, heading: e.heading,
+      sheet: e.sheet || null,
       notes: e.notes, photoCount: (e.photos||[]).length,
       photoTypes: (e.photos||[]).map(p => p.promptType).filter(Boolean),
       voiceCount: (e.voiceNotes || []).length,
@@ -4046,7 +4382,7 @@ async function exportVisitPackage(opts = {}) {
     ...meta,
     walkScore: visitReadinessScore(items)
   }, null, 2));
-  zip.file('visit.geojson', JSON.stringify(walkGeoJson({ ...visit, readiness: visitReadinessScore(items) }, items.map((e) => ({ ...e, readiness: equipmentReadiness(e) })), areas), null, 2));
+  zip.file('visit.geojson', JSON.stringify(walkGeoJson({ ...visit, readiness: visitReadinessScore(items) }, scored, areas), null, 2));
   let voiceIdx = 1;
   for (const eq of items) {
     for (const note of eq.voiceNotes || []) {
@@ -4063,7 +4399,7 @@ async function exportVisitPackage(opts = {}) {
       'FieldVault ground-truth / digital-twin package',
       '',
       'This archive is structured for modeling and digital-twin workflows.',
-      'equipment.csv includes GPS and reference-view types.',
+      'equipment.csv includes GPS, heading, accuracy, and reference-view types.',
       'Photos are grouped by sector/area and asset tag.',
       'External geospatial or drone layers can be aligned to the GPS points in equipment.csv.',
       '',
@@ -4072,27 +4408,9 @@ async function exportVisitPackage(opts = {}) {
     ].join('\n'));
   }
 
-  let csv = 'tag,type,service,pid,line,mfr,model,serial,area,location,lat,lng,gps_acc,notes,readiness,photo_file,view_type\n';
-  let photoIdx = 1;
-  for (const eq of items) {
-    const areaName = areaMap[eq.areaId] || 'unassigned';
-    const folder = 'photos/' + safeName(areaName) + '/' + safeName(eq.tag);
-    const photos = eq.photos || [];
-    const ident = [eq.tag||'', eq.eqType||'', eq.service||'', eq.pid||'', eq.lineNo||'', eq.mfr||'', eq.model||'', eq.serial||''];
-    const ready = equipmentReadiness(eq);
-    if (!photos.length) {
-      csv += ident.map(csvCell).join(',') + ',' + csvCell(areaName) + ',' + csvCell(eq.locationDesc) + ',' + csvCell(eq.lat??'') + ',' + csvCell(eq.lng??'') + ',' + csvCell(eq.gpsAcc??'') + ',' + csvCell(eq.notes) + ',' + csvCell(ready) + ',,\n';
-    }
-    for (const p of photos) {
-      const fname = safeName(eq.tag) + '_' + (p.promptType || 'photo') + '_' + photoIdx + '.jpg';
-      photoIdx++;
-      const src = await photoDataUrl(p);
-      const data = (src || '').split(',')[1];
-      if (data) zip.file(folder + '/' + fname, data, { base64: true });
-      csv += ident.map(csvCell).join(',') + ',' + csvCell(areaName) + ',' + csvCell(eq.locationDesc) + ',' + csvCell(p.lat??eq.lat??'') + ',' + csvCell(p.lng??eq.lng??'') + ',' + csvCell(p.gpsAcc??eq.gpsAcc??'') + ',' + csvCell(p.note||eq.notes) + ',' + csvCell(ready) + ',' + csvCell(folder + '/' + fname) + ',' + csvCell(p.promptType) + '\n';
-    }
-  }
-  zip.file('equipment.csv', csv);
+  await zipPhotoFiles(zip, items, fileForPhoto);
+  zip.file('equipment.csv', equipmentCsv(scored, areas, fileForPhoto));
+  await zipVisitDrawings(zip, visit);
 
   if (opts && opts.client) {
     showToast('Building client package…');
@@ -4113,10 +4431,37 @@ async function exportVisitPackage(opts = {}) {
 
   const blob = await zip.generateAsync({ type: 'blob' });
   const filename = (opts && opts.client ? 'FieldVault_client_' : 'FieldVault_') + safeName(visit.title) + '.zip';
+  await finishZipShare(blob, filename, visit.title || 'FieldVault', opts);
+}
+
+async function exportDrawingPackage(opts = {}) {
+  if (typeof JSZip === 'undefined') { showToast('ZIP library not loaded'); return; }
+  if (!currentVisitId) { showToast('Open a visit first'); return; }
+  const visit = await dbGet(STORE_VISITS, currentVisitId);
+  if (!visit) return;
+  const areas = await dbGetByIndex(STORE_AREAS, 'visitId', currentVisitId);
+  const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
+  showToast('Building drawing pack…');
+  const zip = new JSZip();
+  const areaMap = Object.fromEntries(areas.map(a => [a.id, a.name]));
+  const scored = items.map((e) => ({ ...e, readiness: equipmentReadiness(e) }));
+  const fileForPhoto = photoZipBinder(areaMap);
+  zip.file('equipment.csv', equipmentCsv(scored, areas, fileForPhoto));
+  zip.file('visit.geojson', JSON.stringify(walkGeoJson(visit, scored, areas), null, 2));
+  zip.file('photos/index.csv', photoIndexCsv(scored, areas, fileForPhoto));
+  zip.file('PLACE_ON_SHEET.txt', placeOnSheetNote());
+  await zipPhotoFiles(zip, items, fileForPhoto);
+  await zipVisitDrawings(zip, visit);
+  const blob = await zip.generateAsync({ type: 'blob' });
+  const filename = 'FieldVault_drawings_' + safeName(visit.title) + '.zip';
+  await finishZipShare(blob, filename, (visit.title || 'FieldVault') + ' drawings', { share: opts.share !== false });
+}
+
+async function finishZipShare(blob, filename, title, opts) {
   const file = new File([blob], filename, { type: 'application/zip' });
   if (opts && opts.share && navigator.canShare && navigator.canShare({ files: [file] })) {
     try {
-      await navigator.share({ title: visit.title || 'FieldVault', files: [file] });
+      await navigator.share({ title: title || 'FieldVault', files: [file] });
       showToast('Package shared');
       return;
     } catch (e) {
@@ -4312,6 +4657,13 @@ function initEvents() {
 
   $('btn-add-area').addEventListener('click', () => openAreaModal(false));
   $('btn-save-area').addEventListener('click', saveArea);
+  $('btn-area-day1')?.addEventListener('click', () => {
+    if (!currentAreaId) return;
+    void dbGet(STORE_AREAS, currentAreaId).then((a) => {
+      if (!a) return;
+      void toggleAreaDay1(a.id, !isAreaDay1Done(a));
+    });
+  });
   $('btn-edit-area').addEventListener('click', async () => {
     const a = await dbGet(STORE_AREAS, currentAreaId);
     if (!a) return;
@@ -4423,6 +4775,30 @@ function initEvents() {
   $('more-install')?.addEventListener('click', () => { setMoreOpen(false); void addToHomeScreen(); });
   $('more-handoff')?.addEventListener('click', () => { setMoreOpen(false); void openHandoffModal(); });
   $('more-export')?.addEventListener('click', () => { setMoreOpen(false); void exportVisitPackage(); });
+  $('more-drawings')?.addEventListener('click', () => { setMoreOpen(false); void exportDrawingPackage(); });
+  $('btn-export-drawings')?.addEventListener('click', () => void exportDrawingPackage());
+  $('fv-cam-sheet-skip')?.addEventListener('click', () => hideSheetPinChip());
+  $('fv-cam-sheet-type')?.addEventListener('click', () => void openSheetPinModal());
+  $('fv-cam-sheet-plan')?.addEventListener('click', () => void openPlanPinModal());
+  $('btn-sheet-pin-close')?.addEventListener('click', closeSheetPinModals);
+  $('btn-sheet-pin-skip')?.addEventListener('click', closeSheetPinModals);
+  $('btn-sheet-pin-save')?.addEventListener('click', () => void saveTypedSheetPin());
+  $('btn-plan-pin-close')?.addEventListener('click', closeSheetPinModals);
+  $('btn-plan-pin-skip')?.addEventListener('click', closeSheetPinModals);
+  $('btn-plan-pin-save')?.addEventListener('click', () => void savePlanPin());
+  $('btn-plan-pin-pick')?.addEventListener('click', () => $('plan-pin-file')?.click());
+  $('plan-pin-file')?.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (file) void pickPlanFile(file);
+  });
+  $('plan-pin-stage')?.addEventListener('click', markPlanTap);
+  $('sheet-pin-grid')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void saveTypedSheetPin();
+    }
+  });
   $('more-pdf')?.addEventListener('click', () => { setMoreOpen(false); $('modal-report')?.classList.remove('hidden'); });
   $('btn-gmap-satellite')?.addEventListener('click', () => setGlobalMapLayer('satellite'));
   $('btn-gmap-street')?.addEventListener('click', () => setGlobalMapLayer('street'));
@@ -4524,6 +4900,7 @@ async function demoPhoto(promptType, label, color, lat, lng) {
     lat,
     lng,
     gpsAcc: 8,
+    heading: 42,
     source: 'demo',
     capturedAt: Date.now()
   };

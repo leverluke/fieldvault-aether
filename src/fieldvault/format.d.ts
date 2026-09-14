@@ -19,6 +19,32 @@ export function walkGeoJson(
   items: unknown[],
   areas: unknown[],
 ): { type: "FeatureCollection"; features: unknown[] };
+export const WEAK_GPS_M: number;
+export function roundHeading(deg: unknown): number | null;
+export function photoHeading(photo?: { heading?: number } | null, eq?: { heading?: number } | null): number | null;
+export function photoGpsAcc(photo?: { gpsAcc?: number } | null, eq?: { gpsAcc?: number } | null): number | null;
+export function bestGpsAccuracyM(eq: { gpsAcc?: number; photos?: Array<{ gpsAcc?: number }> } | null | undefined): number | null;
+export function hasWeakGps(eq: { lat?: number | null; lng?: number | null; gpsAcc?: number; photos?: Array<{ gpsAcc?: number }> } | null | undefined, threshold?: number): boolean;
+export function sheetLocation(
+  eq?: { sheet?: { sheet?: string; name?: string; grid?: string; x?: number; y?: number; drawingId?: string } | null; pid?: string } | null,
+  photo?: { sheet?: { sheet?: string; name?: string; grid?: string; x?: number; y?: number; drawingId?: string } | null } | null,
+): { sheet: string; grid: string; planX: number | ""; planY: number | ""; drawingId: string };
+export const EQUIPMENT_CSV_HEADER: string[];
+export const PHOTO_INDEX_HEADER: string[];
+export function equipmentCsvRow(eq: unknown, photo?: unknown, extras?: { area?: string; readiness?: unknown; photoFile?: string }): unknown[];
+export function equipmentCsv(
+  items: unknown[],
+  areas?: unknown[],
+  fileForPhoto?: (eq: unknown, photo: unknown, index: number) => string,
+): string;
+export function photoIndexCsv(
+  items: unknown[],
+  areas?: unknown[],
+  fileForPhoto?: (eq: unknown, photo: unknown, index: number) => string,
+): string;
+export function placeOnSheetNote(): string;
+export const LEAVE_SITE_SOFT_REASONS: Set<string>;
+export function leaveSiteBlockers<T>(items: T[]): T[];
 export function punchItems<T>(items: T[]): T[];
 export function nearestByGps<T extends { lat?: number | null; lng?: number | null; gpsAcc?: number }>(
   items: T[],
@@ -39,6 +65,22 @@ export function compareEquipmentWalkOrder(a: unknown, b: unknown): number;
 export function hasDarkPhoto(eq: { photos?: Array<{ note?: string }> }): boolean;
 export function officePassReasons(eq: unknown): Array<{ id: string; label: string }>;
 export function officePassItems<T>(items: T[]): T[];
+export function isAreaDay1Done(area: { day1Done?: boolean } | null | undefined): boolean;
+export function coverageByArea<A, T>(
+  areas: A[] | null | undefined,
+  items?: T[] | null,
+): {
+  used: boolean;
+  day1Done: A[];
+  day2Remaining: A[];
+  punchOpen: T[];
+};
+export function coverageSummary(plan: {
+  used?: boolean;
+  day1Done?: unknown[];
+  day2Remaining?: unknown[];
+  punchOpen?: unknown[];
+} | null | undefined): string;
 export function rushShotType(photos: unknown[], pending?: string | null): string | null;
 export function suggestAttachTarget(opts: {
   items?: unknown[];
