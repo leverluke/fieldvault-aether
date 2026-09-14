@@ -96,19 +96,19 @@ export const WORK: WorkItem[] = [
     slug: "aether",
     title: "Aether",
     titleLines: ["Aether"],
-    kicker: "Cortex",
-    dek: "Fourteen subagents behind one voice. Close calls run together. Drafts the table, sees the room, steers a hull in the tab. You still talk to the host.",
+    kicker: "Operator",
+    dek: "On-device memory, skill drafts, confirm-to-fulfill. Eyes and Craft stay the body — Aether is the brain next to them.",
     status: "Live prototype",
-    hero: "A cortex, not a chat window. 14 specialists: life, comms, nav, eyes, map, safety, craft, memory, watch, time, weather, export, brief, help.",
+    hero: "Personal operator loop: talk → memory → plan → skill draft → Levi confirm → receipt or honest gap. No accounts.",
     summary:
-      "Aether books a draft and hands you Call. Eyes run YOLOv8n + COCO, ByteTrack IDs, MoveNet stance, and a 2D SLAM sketch in the tab. Craft yaws toward a lock and holds when the path is blocked. Chart pack / zip / GeoJSON leave with the run. It is not a real vehicle, not a named face, and not the restaurant host.",
+      "Aether remembers Levi on-device, drafts plan/food/parts/project cards, and only acts on confirm phrases. Eyes run YOLOv8n + COCO in the tab. Craft is a simulated hull — not MAVLink. Food still hands you Call or a maps/search handoff; it does not sit on the restaurant line.",
     heroImage: "/media/aether-hero.jpg",
-    playHref: "/apps/aether/craft",
+    playHref: "/apps/aether",
     views: [
       {
-        id: "console",
-        label: "Life",
-        caption: "Book Saturday 7. Call them. Remind me in 20 minutes. Yes to dial.",
+        id: "operator",
+        label: "Operator",
+        caption: "Memory panel, open loops, draft cards. Say order it / do it after you approve.",
         image: "/media/aether-hero.jpg",
       },
       {
@@ -124,16 +124,16 @@ export const WORK: WorkItem[] = [
         image: "/media/lookout-preview.png",
       },
       {
-        id: "cortex",
-        label: "Cortex",
-        caption: "14 subagents. Close scores run as a panel. Status includes what the eyes last saw.",
+        id: "life",
+        label: "Life",
+        caption: "Draft food/call scripts. Confirm phrases open the best handoff — no fake order ids.",
         image: "/media/aether-hero.jpg",
       },
     ],
     features: [
       {
-        title: "Cortex",
-        body: "14 subagents. Close scores run as a panel (brief + eyes). Optional Grok key for fuzzy tool-calling.",
+        title: "Operator",
+        body: "Memory kinds, skill cards (plan/food/parts/project), confirm-to-fulfill with receipts or named gaps.",
       },
       {
         title: "Eyes",
@@ -145,10 +145,10 @@ export const WORK: WorkItem[] = [
       },
       {
         title: "Life",
-        body: "Draft the table, .ics, Gmail compose, tel: or Twilio. You talk to the host.",
+        body: "Draft the table, clipboard + maps/search handoff, tel: or Twilio. You approve spend/send/call.",
       },
     ],
-    cta: { label: "Open eyes", href: "/apps/aether/see" },
+    cta: { label: "Open operator", href: "/apps/aether" },
   },
 ];
 

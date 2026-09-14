@@ -36,6 +36,8 @@ function distM(a: { lat: number; lon: number }, b: { lat: number; lon: number })
 
 export function watchFences(onEnter: (f: Fence) => void) {
   if (typeof navigator === "undefined" || !navigator.geolocation) return () => undefined;
+  // Don't prompt for location until Levi has actually saved a fence.
+  if (!load().length) return () => undefined;
   const inside = new Set<string>();
   const id = navigator.geolocation.watchPosition(
     (p) => {
