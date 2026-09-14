@@ -5,7 +5,10 @@ import {
   attachPreviewText,
   clusterByAccuracy,
   compareEquipmentWalkOrder,
+  coverageByArea,
+  coverageSummary,
   csvCell,
+  isAreaDay1Done,
   isUntitledTag,
   hasDarkPhoto,
   nextWalkGap,
@@ -2162,6 +2165,110 @@ async function walkAgainFrom(visitId) {
   refreshNearest();
 }
 
+function areaHasEquipment(area, equipment) {
+  return equipment.some((e) => e.areaId === area.id);
+}
+
+function areaCoverageCardHtml(a, equipment, planUsed) {
+  const count = equipment.filter((e) => e.areaId === a.id).length;
+  const done = isAreaDay1Done(a);
+  const badge = planUsed
+    ? (done ? '<span class="badge ok">Day 1 done</span>' : '<span class="badge warn">Day 2</span>')
+    : '';
+  const btn = done ? 'Keep for Day 2' : 'Day 1 done';
+  return `<div class="card" data-id="${a.id}">
+    <div class="card-title">${escapeHtml(a.name)}${badge}</div>
+    <div class="card-meta"><span>${count} equipment</span></div>
+    <div class="area-day-row">
+      <button type="button" class="btn-secondary btn-sm area-day1-btn" data-id="${a.id}" data-done="${done ? '1' : '0'}">${btn}</button>
+    </div>
+  </div>`;
+}
+
+function emptyAreasNoteHtml(emptyAreas) {
+  if (!emptyAreas.length) return '';
+  if (!showEmptyAreas) {
+    return `<p class="area-hidden-note">${emptyAreas.length} unused area${emptyAreas.length === 1 ? '' : 's'} hidden. <button type="button" class="btn-secondary btn-sm" id="btn-show-empty-areas">Show</button></p>`;
+  }
+  return '<p class="area-hidden-note"><button type="button" class="btn-secondary btn-sm" id="btn-hide-empty-areas">Hide unused areas</button></p>';
+}
+
+function bindVisitAreaList(areasList, visitId) {
+  areasList.querySelectorAll('.card').forEach((c) => {
+    c.addEventListener('click', (ev) => {
+      if (ev.target.closest('button')) return;
+      currentAreaId = c.dataset.id;
+      showView('view-area-detail');
+      loadAreaDetail(currentAreaId);
+    });
+  });
+  areasList.querySelectorAll('.area-day1-btn').forEach((b) => {
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      void toggleAreaDay1(b.dataset.id, b.dataset.done !== '1');
+    });
+  });
+  $('btn-show-empty-areas')?.addEventListener('click', () => {
+    showEmptyAreas = true;
+    loadVisitDetail(visitId);
+  });
+  $('btn-hide-empty-areas')?.addEventListener('click', () => {
+    showEmptyAreas = false;
+    loadVisitDetail(visitId);
+  });
+}
+
+function renderCoverageCard(plan, areas) {
+  const el = $('coverage-card');
+  if (!el) return;
+  if (!plan || !plan.used) {
+    el.classList.add('hidden');
+    el.innerHTML = '';
+    return;
+  }
+  el.classList.remove('hidden');
+  const names = (list) => (list || []).map((a) => escapeHtml(a.name || 'Area')).join(', ') || 'none';
+  const punch = plan.punchOpen || [];
+  const punchLines = punch.slice(0, 8).map((eq) => {
+    const areaName = (areas.find((a) => a.id === eq.areaId) || {}).name;
+    const reasons = officePassReasons(eq).map((r) => r.label).slice(0, 2).join(' · ');
+    return `<li class="coverage-punch-item" data-id="${eq.id}"><span class="tag-badge">${escapeHtml(eq.tag || '?')}</span>${areaName ? ' · ' + escapeHtml(areaName) : ''} · ${escapeHtml(reasons)}</li>`;
+  }).join('');
+  const extra = punch.length > 8 ? `<li class="coverage-line">…${punch.length - 8} more</li>` : '';
+  el.innerHTML = `
+    <p class="coverage-kicker">Same visit · two days</p>
+    <p class="coverage-line">${escapeHtml(coverageSummary(plan))}</p>
+    <p class="coverage-line"><strong>Day 1 done:</strong> ${names(plan.day1Done)}</p>
+    <p class="coverage-line"><strong>Day 2 remaining:</strong> ${names(plan.day2Remaining)}</p>
+    <p class="coverage-line"><strong>Open punch items</strong> stay on this visit${punch.length ? ':' : '.'}</p>
+    ${punch.length ? `<ul class="coverage-punch">${punchLines}${extra}</ul>` : ''}
+    <button type="button" class="btn-secondary btn-sm" id="btn-coverage-punch">Punch list</button>
+  `;
+  $('btn-coverage-punch')?.addEventListener('click', () => openReadyCheck());
+  el.querySelectorAll('.coverage-punch-item').forEach((li) => {
+    li.addEventListener('click', () => {
+      currentEquipmentId = li.dataset.id;
+      showView('view-equipment-detail');
+      loadEquipmentDetail(currentEquipmentId);
+    });
+  });
+}
+
+async function toggleAreaDay1(id, done) {
+  const area = await dbGet(STORE_AREAS, id);
+  if (!area) return;
+  area.day1Done = !!done;
+  if (done) area.day1DoneAt = Date.now();
+  else delete area.day1DoneAt;
+  area.updatedAt = Date.now();
+  await dbPut(STORE_AREAS, area);
+  showToast(done
+    ? 'Day 1 done — remaining areas and punch items stay on this visit'
+    : 'Area is on Day 2 remaining');
+  if (currentView === 'view-area-detail' && currentAreaId === id) loadAreaDetail(id);
+  else if (currentVisitId) loadVisitDetail(currentVisitId);
+}
+
 async function loadVisitDetail(id) {
   const visit = await dbGet(STORE_VISITS, id);
   if (!visit) { showView('view-visits'); return; }
@@ -2182,42 +2289,37 @@ async function loadVisitDetail(id) {
   renderCompleteness(equipment);
   void refreshWalkHud();
 
+  const punchForCoverage = equipment.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) }));
+  const plan = coverageByArea(areas, punchForCoverage);
   const areasList = $('areas-list');
-  const filledAreas = areas.filter((a) => equipment.some((e) => e.areaId === a.id));
-  const emptyAreas = areas.filter((a) => !equipment.some((e) => e.areaId === a.id));
+  const filledAreas = areas.filter((a) => areaHasEquipment(a, equipment));
+  const emptyAreas = areas.filter((a) => !areaHasEquipment(a, equipment));
   const areasToShow = showEmptyAreas ? areas : filledAreas;
   if (areas.length === 0) {
     areasList.innerHTML = '<p style="color:var(--text-muted);font-size:0.9rem;padding:8px 0">No areas yet. Use + Area, or we can suggest groups from GPS after you pin equipment.</p>';
+    renderCoverageCard(null, areas);
   } else {
-    let html = areasToShow.map(a => {
-      const count = equipment.filter(e => e.areaId === a.id).length;
-      return `<div class="card" data-id="${a.id}">
-        <div class="card-title">${escapeHtml(a.name)}</div>
-        <div class="card-meta"><span>${count} equipment</span></div>
-      </div>`;
-    }).join('');
-    if (emptyAreas.length && !showEmptyAreas) {
-      html += `<p class="area-hidden-note">${emptyAreas.length} unused area${emptyAreas.length === 1 ? '' : 's'} hidden. <button type="button" class="btn-secondary btn-sm" id="btn-show-empty-areas">Show</button></p>`;
-    } else if (emptyAreas.length && showEmptyAreas) {
-      html += `<p class="area-hidden-note"><button type="button" class="btn-secondary btn-sm" id="btn-hide-empty-areas">Hide unused areas</button></p>`;
+    let html = '';
+    if (plan.used) {
+      const day2Shown = showEmptyAreas ? plan.day2Remaining : plan.day2Remaining.filter((a) => areaHasEquipment(a, equipment));
+      const emptyDay2 = plan.day2Remaining.filter((a) => !areaHasEquipment(a, equipment));
+      html += '<h3 class="coverage-sub">Day 1 done</h3>';
+      html += plan.day1Done.length
+        ? plan.day1Done.map((a) => areaCoverageCardHtml(a, equipment, true)).join('')
+        : '<p class="area-hidden-note">None yet.</p>';
+      html += '<h3 class="coverage-sub">Day 2 remaining</h3>';
+      html += day2Shown.length
+        ? day2Shown.map((a) => areaCoverageCardHtml(a, equipment, true)).join('')
+        : '<p class="area-hidden-note">No remaining areas in this list.</p>';
+      html += emptyAreasNoteHtml(emptyDay2);
+    } else {
+      html = areasToShow.map((a) => areaCoverageCardHtml(a, equipment, false)).join('');
+      html += emptyAreasNoteHtml(emptyAreas);
+      if (!html) html = '<p class="area-hidden-note">No equipment in an area yet.</p>';
     }
-    if (!html) html = '<p class="area-hidden-note">No equipment in an area yet.</p>';
     areasList.innerHTML = html;
-    areasList.querySelectorAll('.card').forEach(c => {
-      c.addEventListener('click', () => {
-        currentAreaId = c.dataset.id;
-        showView('view-area-detail');
-        loadAreaDetail(currentAreaId);
-      });
-    });
-    $('btn-show-empty-areas')?.addEventListener('click', () => {
-      showEmptyAreas = true;
-      loadVisitDetail(id);
-    });
-    $('btn-hide-empty-areas')?.addEventListener('click', () => {
-      showEmptyAreas = false;
-      loadVisitDetail(id);
-    });
+    bindVisitAreaList(areasList, id);
+    renderCoverageCard(plan, areas);
   }
 
   renderEqTypeFilter(equipment);
@@ -2462,7 +2564,12 @@ async function loadAreaDetail(id) {
   if (!area) { goBack(); return; }
   currentAreaId = id;
   $('header-title').textContent = area.name;
-  $('area-detail-header').innerHTML = `<h2>${escapeHtml(area.name)}</h2>${area.notes ? `<p class="meta">${escapeHtml(area.notes)}</p>` : ''}`;
+  const day1 = isAreaDay1Done(area);
+  $('area-detail-header').innerHTML = `<h2>${escapeHtml(area.name)}</h2>
+    ${day1 ? '<p class="meta">Day 1 done — open punch items stay on this visit for Day 2.</p>' : ''}
+    ${area.notes ? `<p class="meta">${escapeHtml(area.notes)}</p>` : ''}`;
+  const dayBtn = $('btn-area-day1');
+  if (dayBtn) dayBtn.textContent = day1 ? 'Keep for Day 2' : 'Mark Day 1 done';
   const equipment = await dbGetByIndex(STORE_EQUIPMENT, 'areaId', id);
   equipment.sort((a,b) => (a.tag||'').localeCompare(b.tag||''));
   const list = $('area-equipment-list');
@@ -4312,6 +4419,13 @@ function initEvents() {
 
   $('btn-add-area').addEventListener('click', () => openAreaModal(false));
   $('btn-save-area').addEventListener('click', saveArea);
+  $('btn-area-day1')?.addEventListener('click', () => {
+    if (!currentAreaId) return;
+    void dbGet(STORE_AREAS, currentAreaId).then((a) => {
+      if (!a) return;
+      void toggleAreaDay1(a.id, !isAreaDay1Done(a));
+    });
+  });
   $('btn-edit-area').addEventListener('click', async () => {
     const a = await dbGet(STORE_AREAS, currentAreaId);
     if (!a) return;

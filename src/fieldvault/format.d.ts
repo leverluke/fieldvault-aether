@@ -39,6 +39,22 @@ export function compareEquipmentWalkOrder(a: unknown, b: unknown): number;
 export function hasDarkPhoto(eq: { photos?: Array<{ note?: string }> }): boolean;
 export function officePassReasons(eq: unknown): Array<{ id: string; label: string }>;
 export function officePassItems<T>(items: T[]): T[];
+export function isAreaDay1Done(area: { day1Done?: boolean } | null | undefined): boolean;
+export function coverageByArea<A, T>(
+  areas: A[] | null | undefined,
+  items?: T[] | null,
+): {
+  used: boolean;
+  day1Done: A[];
+  day2Remaining: A[];
+  punchOpen: T[];
+};
+export function coverageSummary(plan: {
+  used?: boolean;
+  day1Done?: unknown[];
+  day2Remaining?: unknown[];
+  punchOpen?: unknown[];
+} | null | undefined): string;
 export function rushShotType(photos: unknown[], pending?: string | null): string | null;
 export function suggestAttachTarget(opts: {
   items?: unknown[];

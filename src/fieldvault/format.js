@@ -232,6 +232,46 @@ export function officePassItems(items) {
   return (items || []).filter((eq) => officePassReasons(eq).length > 0).sort(compareEquipmentWalkOrder);
 }
 
+export function isAreaDay1Done(area) {
+  return !!(area && area.day1Done);
+}
+
+/**
+ * Optional two-day split from existing visit areas.
+ * Unused until at least one area is marked day1Done — same visit, punch items stay open.
+ */
+export function coverageByArea(areas, items) {
+  const list = Array.isArray(areas) ? areas.slice() : [];
+  const day1Done = list.filter(isAreaDay1Done);
+  const day2Remaining = list.filter((a) => !isAreaDay1Done(a));
+  return {
+    used: day1Done.length > 0,
+    day1Done,
+    day2Remaining,
+    punchOpen: officePassItems(items),
+  };
+}
+
+export function coverageSummary(plan) {
+  if (!plan || !plan.used) return "";
+  const d1 = (plan.day1Done || []).length;
+  const d2 = (plan.day2Remaining || []).length;
+  const p = (plan.punchOpen || []).length;
+  const punchBit = p
+    ? p + " punch item" + (p === 1 ? "" : "s") + " still open on this visit"
+    : "no open punch items";
+  return (
+    "Day 1: " +
+    d1 +
+    " area" +
+    (d1 === 1 ? "" : "s") +
+    " done · Day 2: " +
+    d2 +
+    " remaining · " +
+    punchBit
+  );
+}
+
 export function rushShotType(photos, pending) {
   if (pending) return pending;
   const n = (photos || []).length;

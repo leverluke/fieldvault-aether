@@ -8,6 +8,9 @@ import {
   mapImportRow,
   parseNameplateText,
   punchItems,
+  coverageByArea,
+  coverageSummary,
+  isAreaDay1Done,
   uniqueFacilities,
   walkGeoJson,
   walkLine,
@@ -208,6 +211,51 @@ test("next walk gap is nearest pin that still needs work", () => {
   );
   assert.equal(gap?.eq.tag, "B");
   assert.match(walkGapText(gap), /B/);
+});
+
+test("optional two-day coverage uses areas on one visit and keeps punch items", () => {
+  const areas = [
+    { id: "pumps", name: "Pump area" },
+    { id: "vessels", name: "Vessels" },
+    { id: "rack", name: "Pipe rack" },
+  ];
+  const items = [
+    { id: "v", tag: "V-301", areaId: "pumps", needsFollowup: true, photos: [{}], lat: 1, lng: 2 },
+    { id: "x", tag: "XV-402", areaId: "rack", photos: [], lat: null, lng: null },
+    { id: "ok", tag: "P-101", areaId: "pumps", photos: [{}], lat: 1, lng: 2 },
+  ];
+
+  assert.equal(isAreaDay1Done(null), false);
+  assert.equal(isAreaDay1Done({}), false);
+
+  const unused = coverageByArea(areas, items);
+  assert.equal(unused.used, false);
+  assert.equal(unused.day1Done.length, 0);
+  assert.equal(unused.day2Remaining.length, 3);
+  assert.equal(coverageSummary(unused), "");
+  assert.ok(unused.punchOpen.some((e) => e.tag === "V-301"));
+  assert.ok(unused.punchOpen.some((e) => e.tag === "XV-402"));
+  assert.ok(!unused.punchOpen.some((e) => e.tag === "P-101"));
+
+  const used = coverageByArea(
+    areas.map((a) => (a.id === "pumps" ? { ...a, day1Done: true } : a)),
+    items,
+  );
+  assert.equal(used.used, true);
+  assert.equal(isAreaDay1Done(used.day1Done[0]), true);
+  assert.deepEqual(
+    used.day1Done.map((a) => a.name),
+    ["Pump area"],
+  );
+  assert.deepEqual(
+    used.day2Remaining.map((a) => a.name),
+    ["Vessels", "Pipe rack"],
+  );
+  assert.ok(used.punchOpen.some((e) => e.tag === "V-301"));
+  assert.ok(used.punchOpen.some((e) => e.tag === "XV-402"));
+  assert.match(coverageSummary(used), /Day 1: 1 area done/);
+  assert.match(coverageSummary(used), /Day 2: 2 remaining/);
+  assert.match(coverageSummary(used), /2 punch items still open on this visit/);
 });
 
 test("dHash and blur helpers", () => {
