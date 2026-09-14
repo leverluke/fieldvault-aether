@@ -1,24 +1,27 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import type { AgentId } from "@/aether/brain/bank";
-import { snapshot, brainTrace, recall } from "@/aether/brain/world";
+import { snapshot } from "@/aether/brain/world";
+import { loadOperator, liveMemories } from "@/aether/operator";
 
-const NODES: { id: AgentId; label: string; w: number; ang: number; rad: number; rgb: [number, number, number] }[] = [
-  { id: "eyes", label: "eyes", w: 1, ang: -1.72, rad: 0.62, rgb: [72, 168, 176] },
-  { id: "craft", label: "craft", w: 0.92, ang: -0.95, rad: 0.7, rgb: [212, 160, 84] },
-  { id: "life", label: "life", w: 0.88, ang: 0.28, rad: 0.66, rgb: [196, 92, 74] },
-  { id: "memory", label: "memory", w: 0.74, ang: 2.05, rad: 0.78, rgb: [138, 122, 176] },
-  { id: "map", label: "map", w: 0.7, ang: -2.35, rad: 0.88, rgb: [72, 168, 176] },
-  { id: "brief", label: "brief", w: 0.64, ang: 1.35, rad: 0.58, rgb: [138, 122, 176] },
-  { id: "safety", label: "safety", w: 0.6, ang: -0.42, rad: 0.92, rgb: [196, 92, 74] },
-  { id: "comms", label: "comms", w: 0.55, ang: 0.72, rad: 0.9, rgb: [196, 92, 74] },
-  { id: "nav", label: "nav", w: 0.5, ang: 0.08, rad: 0.98, rgb: [212, 160, 84] },
-  { id: "watch", label: "watch", w: 0.48, ang: 2.55, rad: 0.95, rgb: [72, 168, 176] },
-  { id: "time", label: "time", w: 0.4, ang: 1.78, rad: 1.05, rgb: [138, 122, 176] },
-  { id: "export", label: "export", w: 0.36, ang: -2.85, rad: 1.08, rgb: [154, 149, 140] },
-  { id: "weather", label: "weather", w: 0.3, ang: 3.05, rad: 1.12, rgb: [88, 140, 108] },
-  { id: "help", label: "help", w: 0.26, ang: 2.28, rad: 1.16, rgb: [154, 149, 140] },
+type NodeId = "talk" | "memory" | "plan" | "skill" | "draft" | "confirm" | "lesson" | "body";
+
+const NODES: {
+  id: NodeId;
+  label: string;
+  w: number;
+  ang: number;
+  rad: number;
+  rgb: [number, number, number];
+}[] = [
+  { id: "talk", label: "talk", w: 1, ang: -1.85, rad: 0.58, rgb: [212, 160, 84] },
+  { id: "memory", label: "memory", w: 0.95, ang: -0.95, rad: 0.68, rgb: [138, 122, 176] },
+  { id: "plan", label: "plan", w: 0.9, ang: -0.15, rad: 0.72, rgb: [72, 168, 176] },
+  { id: "skill", label: "skill", w: 0.88, ang: 0.55, rad: 0.7, rgb: [196, 92, 74] },
+  { id: "draft", label: "draft", w: 0.92, ang: 1.35, rad: 0.66, rgb: [212, 160, 84] },
+  { id: "confirm", label: "confirm", w: 0.86, ang: 2.15, rad: 0.74, rgb: [88, 140, 108] },
+  { id: "lesson", label: "lesson", w: 0.7, ang: 2.85, rad: 0.88, rgb: [154, 149, 140] },
+  { id: "body", label: "body", w: 0.62, ang: -2.55, rad: 0.92, rgb: [72, 168, 176] },
 ];
 
 function rgba(rgb: [number, number, number], a: number) {
@@ -31,6 +34,21 @@ function pos(n: (typeof NODES)[0], cx: number, cy: number, R: number, t: number)
   const ang = n.ang + spin;
   const r = R * n.rad + drift;
   return { x: cx + Math.cos(ang) * r, y: cy + Math.sin(ang) * r, r, ang };
+}
+
+function liveNode(): NodeId | null {
+  try {
+    const op = loadOperator();
+    const open = op.cards.find((c) => c.status === "draft" || c.status === "executing");
+    if (open?.status === "executing") return "confirm";
+    if (open) return "draft";
+    if (op.cards.some((c) => c.status === "rejected")) return "lesson";
+    if (liveMemories(op).length) return "memory";
+    if (op.activeProjectId) return "body";
+  } catch {
+    /* SSR / storage */
+  }
+  return null;
 }
 
 export function AetherMind() {
@@ -67,9 +85,16 @@ export function AetherMind() {
       const cy = h * 0.5;
       const R = Math.min(w, h) * 0.34;
       const world = snapshot();
-      const last = brainTrace()[0];
-      const mem = recall();
-      const live = (last?.agent as AgentId) || (mem.agent as AgentId) || null;
+      let opMem = 0;
+      let opCards = 0;
+      try {
+        const op = loadOperator();
+        opMem = liveMemories(op).length;
+        opCards = op.cards.filter((c) => c.status === "draft").length;
+      } catch {
+        /* ignore */
+      }
+      const live = liveNode();
 
       const g = ctx.createRadialGradient(cx, cy, 8, cx, cy, R * 1.35);
       g.addColorStop(0, "rgba(212,160,84,0.07)");
@@ -78,14 +103,28 @@ export function AetherMind() {
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, w, h);
 
-      if (Math.random() < 0.05) {
-        const heavy = NODES.map((n, i) => ({ i, p: n.w * n.w })).sort((a, b) => b.p - a.p);
-        const pick = Math.random() < 0.65 ? heavy[Math.floor(Math.random() * 4)].i : Math.floor(Math.random() * NODES.length);
-        sparks.push({ i: pick, u: 0 });
+      if (Math.random() < 0.06) {
+        const i = Math.floor(Math.random() * NODES.length);
+        sparks.push({ i, u: 0 });
       }
       if (live) {
         const i = NODES.findIndex((n) => n.id === live);
-        if (i >= 0 && Math.random() < 0.1) sparks.push({ i, u: 0 });
+        if (i >= 0 && Math.random() < 0.12) sparks.push({ i, u: 0 });
+      }
+
+      // Operator ring edges in loop order
+      const ring = ["talk", "memory", "plan", "skill", "draft", "confirm", "lesson"] as NodeId[];
+      for (let i = 0; i < ring.length; i++) {
+        const a = NODES.find((n) => n.id === ring[i])!;
+        const b = NODES.find((n) => n.id === ring[(i + 1) % ring.length])!;
+        const pa = pos(a, cx, cy, R, t);
+        const pb = pos(b, cx, cy, R, t);
+        ctx.strokeStyle = "rgba(154,149,140,0.12)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(pa.x, pa.y);
+        ctx.lineTo(pb.x, pb.y);
+        ctx.stroke();
       }
 
       NODES.forEach((n) => {
@@ -124,10 +163,10 @@ export function AetherMind() {
       ctx.font = "600 12px ui-sans-serif, system-ui";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText("CORTEX", cx, cy - 5);
+      ctx.fillText("OPERATOR", cx, cy - 5);
       ctx.fillStyle = "#9a958c";
       ctx.font = "10px ui-sans-serif, system-ui";
-      ctx.fillText("weighted mind", cx, cy + 11);
+      ctx.fillText("draft → confirm", cx, cy + 11);
 
       const drawn = NODES.map((n) => ({ n, p: pos(n, cx, cy, R, t) })).sort((a, b) => a.n.w - b.n.w);
       for (const { n, p } of drawn) {
@@ -150,7 +189,11 @@ export function AetherMind() {
       ctx.font = "10px ui-sans-serif, system-ui";
       const see = world.objects.slice(0, 4).join(" · ") || "eyes dark";
       ctx.fillText(see, 14, h - 28);
-      ctx.fillText(`${world.hull} hull · ${world.list} list · ${world.openTasks} tasks`, 14, h - 14);
+      ctx.fillText(
+        `${opMem} memories · ${opCards} drafts · ${world.hull} hull`,
+        14,
+        h - 14,
+      );
 
       raf = requestAnimationFrame(tick);
     };
@@ -165,7 +208,7 @@ export function AetherMind() {
     <div className="relative overflow-hidden rounded-xl border border-border bg-[#0c0c0d]">
       <canvas ref={ref} className="block aspect-[16/10] w-full" />
       <p className="pointer-events-none absolute top-3 left-4 text-[10px] uppercase tracking-[0.18em] text-muted">
-        Mind
+        Operator loop
       </p>
     </div>
   );

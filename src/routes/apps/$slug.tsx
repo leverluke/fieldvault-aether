@@ -8,8 +8,7 @@ import { Reveal } from "@/components/site/Reveal";
 import { CaptureDemo } from "@/components/demos/CaptureDemo";
 import { GpsDemo } from "@/components/demos/GpsDemo";
 import { ExportDemo } from "@/components/demos/ExportDemo";
-import { AetherPreview } from "@/components/site/AetherPreview";
-import { LookoutPreview } from "@/vision/LookoutPreview";
+import { AetherOperator } from "@/components/site/AetherOperator";
 
 export const Route = createFileRoute("/apps/$slug")({
   component: AppPage,
@@ -20,6 +19,14 @@ function AppPage() {
   const item = bySlug(slug);
   if (!item) throw notFound();
 
+  if (item.slug === "aether") {
+    return <AetherOperator />;
+  }
+
+  return <CatalogAppPage item={item} />;
+}
+
+function CatalogAppPage({ item }: { item: NonNullable<ReturnType<typeof bySlug>> }) {
   const [viewId, setViewId] = useState(item.views[0]?.id);
   const view = item.views.find((v) => v.id === viewId) ?? item.views[0];
 
@@ -32,11 +39,6 @@ function AppPage() {
       ) : (
         <CaptureDemo />
       )
-    ) : item.slug === "aether" ? (
-      <div className="grid gap-4">
-        <AetherPreview />
-        <LookoutPreview />
-      </div>
     ) : undefined;
 
   return (
