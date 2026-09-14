@@ -98,22 +98,18 @@ function browserAdapters() {
     },
     openUrl(url: string) {
       try {
-        window.open(url, "_blank", "noopener,noreferrer");
-        return true;
-      } catch {
-        try {
+        if (url.startsWith("tel:") || url.startsWith("mailto:") || url.startsWith("sms:")) {
           window.location.href = url;
           return true;
-        } catch {
-          return false;
         }
+        const w = window.open(url, "_blank", "noopener,noreferrer");
+        return !!w;
+      } catch {
+        return false;
       }
     },
-    share(t: string) {
-      if (typeof navigator !== "undefined" && "share" in navigator) {
-        void navigator.share({ text: t });
-        return true;
-      }
+    share(_t: string) {
+      // navigator.share is async + user-cancelled often — never claim success from existence alone.
       return false;
     },
   };

@@ -640,14 +640,20 @@ export async function run(raw: string, ctx: Ctx): Promise<Reply> {
   const q = strip(rewrite(raw));
   if (!q) return { text: "Go ahead." };
 
-  // Operator confirm-to-fulfill wins when a draft card is open (Levi said order it / do it / …).
+  // Operator confirm-to-fulfill when a draft card is open.
+  // Keep classic yes/do it for cortex pending dials when both exist.
   const confirmHit = isConfirmPhrase(raw) || isConfirmPhrase(q);
   if (confirmHit) {
     const op = loadOperator();
     const open = op.cards.some(
       (c) => c.status === "draft" || c.status === "needs_connector",
     );
-    if (open) {
+    const classicPending =
+      hasPending() && /^(yes|go ahead|do it|confirm)$/i.test(q.trim());
+    const spendPhrase = /\b(order this|order it|buy this|buy it|call them|send it)\b/i.test(
+      raw,
+    );
+    if (open && (spendPhrase || !classicPending)) {
       const out = runOperator(raw.trim() || q);
       return { text: out.reply, speak: out.reply.split("\n")[0], ran: "operator" };
     }
@@ -661,13 +667,17 @@ export async function run(raw: string, ctx: Ctx): Promise<Reply> {
     return { text: undoLast(), ran: "undo" };
   }
 
-  // Personal operator: memory statements + plan/food/project-brain drafts.
+  // Personal operator: life facts + plan/food/project-brain drafts.
+  // Leave “remember X is Y” to cortex setFact / runMemory.
+  const rememberKv = /\bremember (?:that )?(.+?) (?:is|=) (.+)/i.test(raw) ||
+    /\bremember the (.+?) is (.+)/i.test(raw);
   const operatorish =
-    !!pickSkill(raw) ||
-    !!parseMemoryStatement(raw) ||
-    /\b(what do you know(?: about me)?|show memory|attach (?:to )?(?:craft|fieldvault|eyes)|what should happen next|plan dinner|plan lunch|reject|forget that draft)\b/i.test(
-      raw,
-    );
+    !rememberKv &&
+    (!!pickSkill(raw) ||
+      !!parseMemoryStatement(raw) ||
+      /\b(what do you know(?: about me)?|show memory|attach (?:to )?(?:craft|fieldvault|eyes)|what should happen next|plan dinner|plan lunch|reject|forget that draft)\b/i.test(
+        raw,
+      ));
   if (operatorish && !isCraft(q) && !/\b(take off|land|follow #|seek)\b/i.test(q)) {
     const out = runOperator(raw.trim());
     if (out.kind !== "help") {
