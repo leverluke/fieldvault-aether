@@ -20,6 +20,15 @@ import {
   attachPreviewText,
   officePassItems,
   officePassReasons,
+  leaveSiteBlockers,
+  hasWeakGps,
+  equipmentCsv,
+  photoIndexCsv,
+  placeOnSheetNote,
+  sheetLocation,
+  photoHeading,
+  photoGpsAcc,
+  WEAK_GPS_M,
   compareTags,
   compareEquipmentWalkOrder,
   rushShotType,
@@ -78,8 +87,12 @@ test("walk line and geojson include GPS points and a path", () => {
   assert.equal(line.length, 2);
   assert.equal(line[0].eq.tag, "E-210");
   const gj = walkGeoJson({ title: "Crude" }, items, []);
-  assert.equal(gj.features.length, 3);
-  assert.equal(gj.features[2].geometry.type, "LineString");
+  const points = gj.features.filter((f) => f.geometry.type === "Point");
+  const lines = gj.features.filter((f) => f.geometry.type === "LineString");
+  assert.equal(lines.length, 1);
+  assert.ok(points.length >= 2);
+  assert.equal("gps_acc" in points[0].properties, true);
+  assert.equal("heading" in points[0].properties, true);
 });
 
 test("nameplate parse pulls a plant tag", () => {
@@ -256,6 +269,80 @@ test("optional two-day coverage uses areas on one visit and keeps punch items", 
   assert.match(coverageSummary(used), /Day 1: 1 area done/);
   assert.match(coverageSummary(used), /Day 2: 2 remaining/);
   assert.match(coverageSummary(used), /2 punch items still open on this visit/);
+});
+
+test("per-shot heading and gps_acc land on CSV, GeoJSON, and punch list without blocking leave", () => {
+  const eq = {
+    tag: "P-101",
+    eqType: "pump",
+    pid: "P&ID-CU-101",
+    areaId: "pumps",
+    lat: 29.7,
+    lng: -95.0,
+    gpsAcc: 8,
+    heading: 42,
+    photos: [{ promptType: "overall", lat: 29.7, lng: -95.0, gpsAcc: 8, heading: 42, capturedAt: 1 }],
+  };
+  const weak = {
+    tag: "XV-402",
+    lat: 29.71,
+    lng: -95.01,
+    gpsAcc: 90,
+    photos: [{ promptType: "overall", lat: 29.71, lng: -95.01, gpsAcc: 90, capturedAt: 2 }],
+  };
+  assert.equal(photoHeading(eq.photos[0], eq), 42);
+  assert.equal(photoGpsAcc(eq.photos[0], eq), 8);
+  assert.equal(hasWeakGps(eq), false);
+  assert.equal(hasWeakGps(weak), true);
+  assert.ok(WEAK_GPS_M >= 25);
+
+  const csv = equipmentCsv([eq], [{ id: "pumps", name: "Pump area" }], () => "photos/Pump_area/P-101/P-101_overall_1.jpg");
+  assert.match(csv, /^"tag".*"gps_acc","heading"/m);
+  assert.match(csv, /"8","42"/);
+  assert.match(csv, /"P&ID-CU-101"/);
+
+  const index = photoIndexCsv([eq], [], () => "photos/Pump_area/P-101/P-101_overall_1.jpg");
+  assert.match(index, /"heading"/);
+  assert.match(index, /"8","42"/);
+
+  const gj = walkGeoJson({ title: "Crude" }, [eq], [{ id: "pumps", name: "Pump area" }]);
+  const photoFeat = gj.features.find((f) => f.properties.kind === "photo");
+  assert.equal(photoFeat.properties.heading, 42);
+  assert.equal(photoFeat.properties.gps_acc, 8);
+  assert.equal(photoFeat.properties.pid, "P&ID-CU-101");
+
+  const weakReasons = officePassReasons(weak).map((r) => r.id);
+  assert.ok(weakReasons.includes("weakgps"));
+  assert.ok(!officePassReasons(eq).some((r) => r.id === "weakgps"));
+  assert.ok(!officePassReasons(eq).some((r) => r.id === "heading"));
+  assert.equal(leaveSiteBlockers([eq, weak]).length, 0);
+  assert.equal(nextWalkGap([eq, weak], 29.7, -95), null);
+  assert.ok(officePassItems([eq, weak]).some((e) => e.tag === "XV-402"));
+  assert.match(placeOnSheetNote(), /sheet \+ grid/i);
+});
+
+test("optional sheet location is skippable and serializes for drawings", () => {
+  const bare = { tag: "P-101", photos: [{}] };
+  assert.deepEqual(sheetLocation(bare, bare.photos[0]), {
+    sheet: "",
+    grid: "",
+    planX: "",
+    planY: "",
+    drawingId: "",
+  });
+  const pinned = {
+    tag: "P-101",
+    pid: "P&ID-CU-101",
+    sheet: { sheet: "P&ID-CU-101", grid: "C-4", x: 0.42, y: 0.31, drawingId: "d1" },
+    photos: [{ sheet: { sheet: "P&ID-CU-101", grid: "C-4", x: 0.42, y: 0.31, drawingId: "d1" } }],
+  };
+  const loc = sheetLocation(pinned, pinned.photos[0]);
+  assert.equal(loc.sheet, "P&ID-CU-101");
+  assert.equal(loc.grid, "C-4");
+  assert.equal(loc.planX, 0.42);
+  const csv = equipmentCsv([pinned], [], () => "photos/x.jpg");
+  assert.match(csv, /"C-4"/);
+  assert.match(csv, /"0.42"/);
 });
 
 test("dHash and blur helpers", () => {

@@ -1211,6 +1211,58 @@ body.defense-mode .app-header { background: #10161c; }
   font-weight: 700;
   color: #fff;
 }
+.fv-cam-sheet {
+  position: relative;
+  z-index: 2;
+  margin: 8px 14px 0;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: rgba(0,0,0,0.72);
+}
+.fv-cam-sheet-copy {
+  margin: 0 0 8px;
+  font-size: 0.82rem;
+  color: #d5dde3;
+  text-align: center;
+}
+.fv-cam-sheet-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+.fv-cam-sheet-actions .fv-cam-textbtn {
+  min-height: 44px;
+  min-width: 0;
+  flex: 1;
+  font-size: 0.85rem;
+}
+.plan-pin-stage {
+  position: relative;
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg);
+  min-height: 180px;
+  cursor: crosshair;
+}
+.plan-pin-stage img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 52vh;
+  object-fit: contain;
+}
+.plan-pin-dot {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  margin: -8px 0 0 -8px;
+  border-radius: 50%;
+  background: #e07a5f;
+  border: 2px solid #fff;
+  pointer-events: none;
+}
 .fv-cam-textbtn {
   min-height: 56px;
   min-width: 88px;

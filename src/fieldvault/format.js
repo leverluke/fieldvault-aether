@@ -94,22 +94,104 @@ export function walkLine(items) {
   return walkEvents(items).filter((e) => e.lat != null && e.lng != null);
 }
 
-export function walkGeoJson(visit, items, areas) {
+/** GPS accuracy worse than this (meters) is flagged on the punch list, not a leave-site blocker. */
+export const WEAK_GPS_M = 40;
+
+export function roundHeading(deg) {
+  const n = Number(deg);
+  if (!Number.isFinite(n)) return null;
+  return Math.round(((n % 360) + 360) % 360);
+}
+
+export function photoHeading(photo, eq) {
+  return roundHeading(photo?.heading ?? eq?.heading);
+}
+
+export function photoGpsAcc(photo, eq) {
+  const n = Number(photo?.gpsAcc ?? eq?.gpsAcc);
+  return Number.isFinite(n) ? n : null;
+}
+
+export function bestGpsAccuracyM(eq) {
+  let best = null;
+  const consider = (v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 0) return;
+    if (best == null || n < best) best = n;
+  };
+  consider(eq?.gpsAcc);
+  for (const p of eq?.photos || []) consider(p.gpsAcc);
+  return best;
+}
+
+export function hasWeakGps(eq, threshold = WEAK_GPS_M) {
+  if (eq?.lat == null || eq?.lng == null) return false;
+  const acc = bestGpsAccuracyM(eq);
+  if (acc == null) return false;
+  return acc > threshold;
+}
+
+export function sheetLocation(eq, photo) {
+  const loc = (photo && photo.sheet) || (eq && eq.sheet) || null;
+  if (!loc || typeof loc !== "object") {
+    return { sheet: "", grid: "", planX: "", planY: "", drawingId: "" };
+  }
+  const x = loc.x;
+  const y = loc.y;
+  return {
+    sheet: String(loc.sheet || loc.name || ""),
+    grid: String(loc.grid || ""),
+    planX: x != null && x !== "" && Number.isFinite(Number(x)) ? Number(x) : "",
+    planY: y != null && y !== "" && Number.isFinite(Number(y)) ? Number(y) : "",
+    drawingId: String(loc.drawingId || ""),
+  };
+}
+
+export function geoJsonPointProperties(eq, photo, areas) {
   const areaMap = Object.fromEntries((areas || []).map((a) => [a.id, a.name]));
+  const loc = sheetLocation(eq, photo);
+  return {
+    tag: eq?.tag || "",
+    type: eq?.eqType || "",
+    area: areaMap[eq?.areaId] || "",
+    pid: eq?.pid || "",
+    readiness: eq?.readiness ?? null,
+    visit: "",
+    gps_acc: photoGpsAcc(photo, eq),
+    heading: photoHeading(photo, eq),
+    sheet: loc.sheet,
+    grid: loc.grid,
+    plan_x: loc.planX,
+    plan_y: loc.planY,
+  };
+}
+
+export function walkGeoJson(visit, items, areas) {
   const features = [];
   for (const eq of items || []) {
     if (eq.lat == null || eq.lng == null) continue;
+    const props = geoJsonPointProperties(eq, null, areas);
+    props.visit = visit?.title || "";
+    props.kind = "equipment";
     features.push({
       type: "Feature",
-      properties: {
-        tag: eq.tag || "",
-        type: eq.eqType || "",
-        area: areaMap[eq.areaId] || "",
-        readiness: eq.readiness ?? null,
-        visit: visit?.title || "",
-      },
+      properties: props,
       geometry: { type: "Point", coordinates: [Number(eq.lng), Number(eq.lat)] },
     });
+    for (const p of eq.photos || []) {
+      const lat = p.lat ?? eq.lat;
+      const lng = p.lng ?? eq.lng;
+      if (lat == null || lng == null) continue;
+      const photoProps = geoJsonPointProperties(eq, p, areas);
+      photoProps.visit = visit?.title || "";
+      photoProps.kind = "photo";
+      photoProps.view_type = p.promptType || "";
+      features.push({
+        type: "Feature",
+        properties: photoProps,
+        geometry: { type: "Point", coordinates: [Number(lng), Number(lat)] },
+      });
+    }
   }
   const line = walkLine(items);
   if (line.length >= 2) {
@@ -123,6 +205,139 @@ export function walkGeoJson(visit, items, areas) {
     });
   }
   return { type: "FeatureCollection", features };
+}
+
+export const EQUIPMENT_CSV_HEADER = [
+  "tag",
+  "type",
+  "service",
+  "pid",
+  "line",
+  "mfr",
+  "model",
+  "serial",
+  "area",
+  "location",
+  "lat",
+  "lng",
+  "gps_acc",
+  "heading",
+  "sheet",
+  "grid",
+  "plan_x",
+  "plan_y",
+  "notes",
+  "readiness",
+  "photo_file",
+  "view_type",
+];
+
+export const PHOTO_INDEX_HEADER = [
+  "photo_file",
+  "tag",
+  "pid",
+  "sheet",
+  "grid",
+  "plan_x",
+  "plan_y",
+  "view_type",
+  "lat",
+  "lng",
+  "gps_acc",
+  "heading",
+];
+
+export function equipmentCsvRow(eq, photo, extras = {}) {
+  const loc = sheetLocation(eq, photo);
+  const lat = photo ? photo.lat ?? eq?.lat : eq?.lat;
+  const lng = photo ? photo.lng ?? eq?.lng : eq?.lng;
+  return [
+    eq?.tag || "",
+    eq?.eqType || "",
+    eq?.service || "",
+    eq?.pid || "",
+    eq?.lineNo || "",
+    eq?.mfr || "",
+    eq?.model || "",
+    eq?.serial || "",
+    extras.area || "",
+    eq?.locationDesc || "",
+    lat ?? "",
+    lng ?? "",
+    photoGpsAcc(photo, eq) ?? "",
+    photoHeading(photo, eq) ?? "",
+    loc.sheet,
+    loc.grid,
+    loc.planX,
+    loc.planY,
+    (photo && photo.note) || eq?.notes || "",
+    extras.readiness ?? "",
+    extras.photoFile || "",
+    (photo && photo.promptType) || "",
+  ];
+}
+
+export function equipmentCsv(items, areas, fileForPhoto) {
+  const areaMap = Object.fromEntries((areas || []).map((a) => [a.id, a.name]));
+  const lines = [csvRow(EQUIPMENT_CSV_HEADER)];
+  for (const eq of items || []) {
+    const area = areaMap[eq.areaId] || "unassigned";
+    const photos = eq.photos || [];
+    const extras = { area, readiness: eq.readiness ?? "" };
+    if (!photos.length) {
+      lines.push(csvRow(equipmentCsvRow(eq, null, extras)));
+    }
+    photos.forEach((p, i) => {
+      const photoFile = fileForPhoto ? fileForPhoto(eq, p, i) : "";
+      lines.push(csvRow(equipmentCsvRow(eq, p, { ...extras, photoFile })));
+    });
+  }
+  return lines.join("\n") + "\n";
+}
+
+export function photoIndexCsv(items, areas, fileForPhoto) {
+  const lines = [csvRow(PHOTO_INDEX_HEADER)];
+  for (const eq of items || []) {
+    (eq.photos || []).forEach((p, i) => {
+      const loc = sheetLocation(eq, p);
+      lines.push(
+        csvRow([
+          fileForPhoto ? fileForPhoto(eq, p, i) : "",
+          eq.tag || "",
+          eq.pid || "",
+          loc.sheet,
+          loc.grid,
+          loc.planX,
+          loc.planY,
+          p.promptType || "",
+          p.lat ?? eq.lat ?? "",
+          p.lng ?? eq.lng ?? "",
+          photoGpsAcc(p, eq) ?? "",
+          photoHeading(p, eq) ?? "",
+        ]),
+      );
+    });
+  }
+  return lines.join("\n") + "\n";
+}
+
+export function placeOnSheetNote() {
+  return [
+    "How to place FieldVault shots on a drawing",
+    "",
+    "This pack is for the drawing office. It is not a CAD or PM suite.",
+    "",
+    "1. Open equipment.csv (or photos/index.csv) in Excel or a GIS tool.",
+    "2. pid is the P&ID / drawing number when the engineer typed one.",
+    "3. sheet + grid are optional callouts (e.g. P&ID-CU-101 and C-4).",
+    "4. plan_x / plan_y are 0–1 from the top-left of an attached plan image, if they tapped one.",
+    "5. heading is compass degrees when the phone had a heading. Blank is fine — do not wait on heading.",
+    "6. gps_acc is GPS accuracy in meters. Larger numbers are a looser indoor fix.",
+    "7. Drop files from photos/ onto the matching sheet using sheet+grid, or overlay visit.geojson.",
+    "8. Attached PDF/image plans, if any, are in drawings/.",
+    "",
+    "Skip is always valid in the field: GPS + tags only.",
+  ].join("\n");
 }
 
 export function punchItems(items) {
@@ -220,6 +435,10 @@ export function officePassReasons(eq) {
     if (hasNoteFlag(eq, /leak/i)) reasons.push({ id: "leak", label: "Possible leak / rust" });
   }
   if (eq?.lat == null || eq?.lng == null) reasons.push({ id: "gps", label: "No GPS" });
+  else if (hasWeakGps(eq)) {
+    const acc = bestGpsAccuracyM(eq);
+    reasons.push({ id: "weakgps", label: "Weak GPS (±" + Math.round(acc) + " m)" });
+  }
   if (eq?.needsFollowup) reasons.push({ id: "followup", label: "Follow-up flagged" });
   return reasons;
 }
@@ -230,6 +449,15 @@ export function hasNoteFlag(eq, re) {
 
 export function officePassItems(items) {
   return (items || []).filter((eq) => officePassReasons(eq).length > 0).sort(compareEquipmentWalkOrder);
+}
+
+/** Punch-list hints that should not stop Leave site (weak GPS, never heading). */
+export const LEAVE_SITE_SOFT_REASONS = new Set(["weakgps"]);
+
+export function leaveSiteBlockers(items) {
+  return (items || [])
+    .filter((eq) => officePassReasons(eq).some((r) => !LEAVE_SITE_SOFT_REASONS.has(r.id)))
+    .sort(compareEquipmentWalkOrder);
 }
 
 export function isAreaDay1Done(area) {
@@ -406,7 +634,7 @@ export function parseSpokenName(raw) {
 }
 
 export function nextWalkGap(items, lat, lng) {
-  const gaps = officePassItems(items);
+  const gaps = leaveSiteBlockers(items);
   if (!gaps.length) return null;
   const withGps = gaps.filter((e) => e.lat != null && e.lng != null);
   const pool = withGps.length ? withGps : gaps;
