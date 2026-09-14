@@ -77,21 +77,24 @@ function browserAdapters() {
     hasTwilio: !!(cs.twilioSid && cs.twilioToken && cs.twilioFrom),
     copyText(t: string) {
       try {
-        void navigator.clipboard?.writeText(t);
-        return true;
+        const ta = document.createElement("textarea");
+        ta.value = t;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand("copy");
+        ta.remove();
+        if (ok) return true;
       } catch {
-        try {
-          const ta = document.createElement("textarea");
-          ta.value = t;
-          document.body.appendChild(ta);
-          ta.select();
-          const ok = document.execCommand("copy");
-          ta.remove();
-          return ok;
-        } catch {
-          return false;
-        }
+        /* fall through */
       }
+      // Async clipboard can reject without a sync throw — never claim success from the promise alone.
+      if (navigator.clipboard?.writeText) {
+        void navigator.clipboard.writeText(t).catch(() => undefined);
+      }
+      return false;
     },
     openUrl(url: string) {
       try {

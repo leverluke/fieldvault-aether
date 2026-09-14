@@ -26,11 +26,13 @@ const CHIPS = [
 ];
 
 export function AetherOperator() {
-  const [state, setState] = useState<OperatorState>(() =>
-    typeof window === "undefined"
-      ? { memories: [], cards: [], projects: [], activeCardId: null, activeProjectId: null }
-      : loadOperator(),
-  );
+  const [state, setState] = useState<OperatorState>({
+    memories: [],
+    cards: [],
+    projects: [],
+    activeCardId: null,
+    activeProjectId: null,
+  });
   const [input, setInput] = useState("");
   const [log, setLog] = useState<{ who: "you" | "aether"; text: string }[]>([
     {
@@ -41,14 +43,16 @@ export function AetherOperator() {
   const [busy, setBusy] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
     setState(loadOperator());
+    setReady(true);
   }, []);
 
   const known = useMemo(
-    () => state.memories.filter((m) => !m.forgotten).slice(0, 24),
-    [state.memories],
+    () => (ready ? state.memories.filter((m) => !m.forgotten).slice(0, 24) : []),
+    [state.memories, ready],
   );
   const openLoops = useMemo(
     () =>
@@ -68,6 +72,24 @@ export function AetherOperator() {
   );
   const activeProject = state.projects.find((p) => p.id === state.activeProjectId) ?? state.projects[0];
 
+  async function submit(raw: string) {
+    const q = raw.trim();
+    if (!q || busy) return;
+    setBusy(true);
+    setInput("");
+    setLog((l) => [...l, { who: "you", text: q }]);
+    try {
+      const out = runOperator(q);
+      setState(out.state);
+      setLog((l) => [...l, { who: "aether", text: out.reply }]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Operator hit an error.";
+      setLog((l) => [...l, { who: "aether", text: `Could not run that: ${msg}` }]);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function refresh(next: OperatorState, reply: string, you?: string) {
     setState(next);
     setLog((l) => [
@@ -75,19 +97,6 @@ export function AetherOperator() {
       ...(you ? [{ who: "you" as const, text: you }] : []),
       { who: "aether", text: reply },
     ]);
-  }
-
-  async function submit(raw: string) {
-    const q = raw.trim();
-    if (!q || busy) return;
-    setBusy(true);
-    setInput("");
-    try {
-      const out = runOperator(q);
-      refresh(out.state, out.reply, q);
-    } finally {
-      setBusy(false);
-    }
   }
 
   function onConfirm(card: DraftCard, phrase: string) {
