@@ -38,15 +38,12 @@ export function ProductHero({
             >
               {ctaLabel}
             </a>
-            {item.playHref ? (
-              <a
-                href={`/apps/${item.slug}`}
-                className="inline-flex h-11 items-center border border-border px-5 text-sm text-fg hover:border-primary"
-              >
-                About
-              </a>
-            ) : null}
           </div>
+          {item.playHref ? (
+            <p className="a-line mt-4 max-w-md text-sm text-muted">
+              Widgets here are samples. The live walk is {ctaLabel}.
+            </p>
+          ) : null}
           {item.views.length > 1 ? (
             <ul className="a-line mt-10 flex flex-col border-t border-border">
               {item.views.map((v) => (

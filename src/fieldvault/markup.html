@@ -32,11 +32,14 @@
       <div id="coach-card" class="coach-card">
         <h2>How a site visit works</h2>
         <ol class="coach-steps">
-          <li><strong>Snap</strong> as you walk. GPS pins with the photo.</li>
-          <li><strong>Name a tag</strong> when you can — or say it while the camera is open.</li>
-          <li><strong>Punch list</strong> before you leave so the office is not chasing shots.</li>
+          <li><strong>Create First Visit</strong> or tap <strong>Snap</strong> — we start a walk. Camera + area GPS.</li>
+          <li><strong>Snap</strong> equipment. Name a tag when you can. Sheet/grid is optional Skip.</li>
+          <li><strong>Punch list</strong>, then Leave (client pack) or <strong>For drawings</strong> if that is the job.</li>
         </ol>
-        <button type="button" id="btn-coach-dismiss" class="btn-primary">Got it</button>
+        <div class="coach-actions">
+          <button type="button" id="btn-coach-dismiss" class="btn-primary">Got it — start empty</button>
+          <button type="button" id="btn-coach-demo" class="btn-secondary">Load sample walk (demo — not your plant)</button>
+        </div>
       </div>
       <div id="mode-banner" class="mode-banner">
         <p id="mode-banner-text">Oil & gas field notes — photograph equipment, tag it, and leave with a client-ready package.</p>
@@ -48,8 +51,9 @@
           <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>
         </div>
         <h2 id="visits-empty-title">Start walking</h2>
-        <p id="visits-empty-body">Snap first. We start a visit, pin GPS, and you can name tags when you catch your breath.</p>
+        <p id="visits-empty-body">Create a visit, or tap Snap — we start one. GPS is area-level. Sheet/grid is optional Skip.</p>
         <button id="btn-empty-new" class="btn-primary btn-lg">Create First Visit</button>
+        <button type="button" id="btn-load-demo" class="btn-secondary">Load sample walk (demo — not your plant)</button>
       </div>
       <div id="visits-list" class="card-list"></div>
       <div class="home-tools hidden" id="home-tools">
@@ -122,6 +126,7 @@
         <button id="btn-leave-site" class="btn-primary btn-lg">Leave site — send to client</button>
         <button id="btn-send-client" class="btn-primary">Send to client</button>
         <button id="btn-export-drawings" class="btn-secondary">For drawings</button>
+        <p class="help-text">Leave is the client pack. For drawings is the sheet/grid pack (PLACE_ON_SHEET.txt).</p>
         <button id="btn-handoff" class="btn-secondary">Pass to truck</button>
         <button id="btn-walk-again" class="btn-secondary">Walk again</button>
         <button id="btn-edit-visit" class="btn-secondary">Edit Visit</button>
@@ -160,7 +165,7 @@
       </div>
       <div class="form-section fv-eq-tag">
         <label>Name / tag <span class="required">*</span></label>
-        <input type="text" id="eq-tag" placeholder="e.g. P-101 or Charge pump" required>
+        <input type="text" id="eq-tag" list="fv-tag-suggest" placeholder="e.g. P-101 or Charge pump" required>
         <p class="help-text">Plant tag if you have it. If not, a plain name is fine — or just take a photo and we’ll name it.</p>
       </div>
       <div class="form-section fv-eq-area">
@@ -177,7 +182,7 @@
           <div><label>Longitude</label><input type="number" id="eq-lng" step="any" inputmode="decimal" placeholder="0.000000"></div>
         </div>
         <button type="button" id="btn-get-gps" class="btn-secondary gps-btn">Capture GPS</button>
-        <p id="gps-status" class="gps-status">Tap GPS to capture this spot</p>
+        <p id="gps-status" class="gps-status">Tap GPS to capture this area</p>
       </div>
       <div class="form-section fv-eq-notes">
         <label id="eq-notes-label">Notes</label>
@@ -222,12 +227,12 @@
           </div>
           <div class="form-section">
             <label>P&ID / drawing number</label>
-            <input type="text" id="eq-pid" placeholder="e.g. P&ID-12-041">
+            <input type="text" id="eq-pid" list="fv-pid-suggest" placeholder="e.g. P&ID-12-041">
           </div>
           <div class="form-section">
             <label>Sheet + grid (optional)</label>
             <div class="coords-row" style="grid-template-columns:1fr 1fr">
-              <input type="text" id="eq-sheet" placeholder="Sheet / P&ID" autocomplete="off">
+              <input type="text" id="eq-sheet" list="fv-pid-suggest" placeholder="Sheet / P&ID" autocomplete="off">
               <input type="text" id="eq-grid" placeholder="Grid e.g. C-4" autocomplete="off">
             </div>
             <p class="help-text">Skip anytime. GPS and tags still stand on their own.</p>
@@ -399,7 +404,7 @@
     <section id="view-cluster-review" class="view">
       <div class="detail-header">
         <h2 id="cluster-title">Suggested Areas</h2>
-        <p class="meta" id="cluster-meta">Grouped by GPS proximity. Rename them to match this plant.</p>
+        <p class="meta" id="cluster-meta">Area-level GPS — not a sheet pin unless you place one. Nearby tags cluster into plant areas.</p>
       </div>
       <div id="cluster-list" class="card-list"></div>
       <div class="detail-actions">
@@ -410,11 +415,12 @@
     <section id="view-ready-check" class="view">
       <div class="detail-header">
         <h2 id="ready-check-title">Punch list</h2>
-        <p class="meta" id="ready-check-meta">Name untitled pins, retake dark shots, then leave with the package.</p>
+        <p class="meta" id="ready-check-meta">Name untitled pins, retake dark shots, then leave with the package. Sheet/grid is optional — For drawings if the office needs the pack.</p>
       </div>
       <div id="ready-list" class="card-list"></div>
       <div class="detail-actions">
         <button id="btn-leave-site-ready" class="btn-primary btn-lg">Leave site — send to client</button>
+        <button type="button" id="btn-export-drawings-ready" class="btn-secondary">For drawings</button>
         <button id="btn-ready-done" class="btn-secondary">Back to Visit</button>
       </div>
     </section>
@@ -429,7 +435,7 @@
     <video id="fv-cam-video" playsinline muted autoplay></video>
     <div class="fv-cam-top">
       <button type="button" id="fv-cam-done" class="fv-cam-textbtn">Done</button>
-      <div id="fv-cam-gps" class="fv-cam-chip">GPS…</div>
+      <div id="fv-cam-gps" class="fv-cam-chip">Area GPS…</div>
       <div id="fv-cam-count" class="fv-cam-chip">0</div>
       <button type="button" id="fv-cam-torch" class="fv-cam-chip fv-cam-chip-btn hidden" aria-pressed="false">Light</button>
     </div>
@@ -437,12 +443,14 @@
     <div id="fv-cam-hint" class="fv-cam-hint">Stand at the asset. Snap. Keep walking.</div>
     <div id="fv-cam-attach" class="fv-cam-attach"></div>
     <div id="fv-cam-sheet" class="fv-cam-sheet hidden">
-      <p class="fv-cam-sheet-copy">Pin on drawing? Optional. Skip keeps GPS + tags.</p>
+      <p class="fv-cam-sheet-copy">Pin on drawing? Optional. Skip keeps area GPS + tags.</p>
       <div class="fv-cam-sheet-actions">
         <button type="button" id="fv-cam-sheet-skip" class="fv-cam-textbtn">Skip</button>
+        <button type="button" id="fv-cam-sheet-same" class="fv-cam-textbtn hidden">Same sheet</button>
         <button type="button" id="fv-cam-sheet-type" class="fv-cam-textbtn">Sheet</button>
         <button type="button" id="fv-cam-sheet-plan" class="fv-cam-textbtn">PDF</button>
       </div>
+      <label class="fv-cam-sheet-keep"><input type="checkbox" id="fv-cam-sheet-keep"> Keep placing on this sheet</label>
     </div>
     <div id="fv-cam-issues" class="fv-cam-issues">
       <button type="button" class="fv-cam-issue" data-issue="leak">Leak</button>
@@ -464,7 +472,7 @@
         <div class="form-section">
           <label>Tag / name</label>
           <div class="input-with-voice">
-            <input type="text" id="name-pin-tag" placeholder="e.g. P-101 or Charge pump" enterkeyhint="done" autocomplete="off">
+            <input type="text" id="name-pin-tag" list="fv-tag-suggest" placeholder="e.g. P-101 or Charge pump" enterkeyhint="done" autocomplete="off">
             <button type="button" class="btn-voice" id="btn-voice-name-pin" aria-label="Say the tag">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><path d="M12 18v3"/></svg>
             </button>
@@ -492,6 +500,7 @@
       <button type="button" class="more-item" id="more-handoff">Pass visit to another phone</button>
       <button type="button" class="more-item" id="more-export">Export ZIP (office)</button>
       <button type="button" class="more-item" id="more-drawings">For drawings</button>
+      <button type="button" class="more-item" id="more-import-csv">Preload tags from CSV</button>
       <button type="button" class="more-item" id="more-pdf">PDF report (office)</button>
       <button type="button" class="more-item" id="more-backup">Backup data</button>
       <label for="restore-input" class="more-item">Restore backup</label>
@@ -594,7 +603,7 @@
     <div class="modal-content">
       <div class="modal-header"><h2>New Equipment</h2><button class="btn-icon modal-close-qe">×</button></div>
       <div class="modal-body">
-        <div class="form-section"><label>Equipment Tag <span class="required">*</span></label><input type="text" id="qe-tag" placeholder="e.g. P-101 or Charge pump"></div>
+        <div class="form-section"><label>Equipment Tag <span class="required">*</span></label><input type="text" id="qe-tag" list="fv-tag-suggest" placeholder="e.g. P-101 or Charge pump"></div>
         <div class="form-section"><label>Location Description</label><input type="text" id="qe-location" placeholder="Where is it?"></div>
       </div>
       <div class="modal-footer">
@@ -641,7 +650,7 @@
         <p class="help-text">Optional. Skip keeps GPS and tags only. Same visit — no new pin.</p>
         <div class="form-section">
           <label>Sheet / P&amp;ID</label>
-          <input type="text" id="sheet-pin-name" placeholder="e.g. P&amp;ID-CU-101" enterkeyhint="next" autocomplete="off">
+          <input type="text" id="sheet-pin-name" list="fv-pid-suggest" placeholder="e.g. P&amp;ID-CU-101" enterkeyhint="next" autocomplete="off">
         </div>
         <div class="form-section">
           <label>Grid</label>
@@ -669,7 +678,7 @@
         </div>
         <div class="form-section" style="margin-top:12px">
           <label>Sheet / P&amp;ID</label>
-          <input type="text" id="plan-pin-sheet" placeholder="e.g. P&amp;ID-CU-101" autocomplete="off">
+          <input type="text" id="plan-pin-sheet" list="fv-pid-suggest" placeholder="e.g. P&amp;ID-CU-101" autocomplete="off">
         </div>
         <div class="form-section">
           <label>Grid</label>
@@ -682,6 +691,10 @@
       </div>
     </div>
   </div>
+
+  <input type="file" id="import-tags-csv" accept=".csv,text/csv,text/plain" hidden>
+  <datalist id="fv-tag-suggest"></datalist>
+  <datalist id="fv-pid-suggest"></datalist>
 
   <nav id="bottom-nav" class="bottom-nav">
     <button class="nav-item active" data-nav="visits" id="nav-visits">

@@ -1219,6 +1219,31 @@ body.defense-mode .app-header { background: #10161c; }
   border-radius: var(--radius);
   background: rgba(0,0,0,0.72);
 }
+.fv-cam-sheet-sticky {
+  border: 1px solid var(--accent, #8fb8c9);
+  box-shadow: 0 0 0 1px rgba(143, 184, 201, 0.35);
+}
+.fv-cam-sheet-keep {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 8px 0 0;
+  font-size: 0.78rem;
+  color: #d5dde3;
+}
+.fv-cam-sheet-keep input {
+  width: 18px;
+  height: 18px;
+}
+.coach-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+#visits-empty .btn-secondary {
+  margin-top: 10px;
+}
 .fv-cam-sheet-copy {
   margin: 0 0 8px;
   font-size: 0.82rem;
