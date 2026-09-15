@@ -8,13 +8,17 @@ import {
   coverageByArea,
   coverageSummary,
   equipmentCsv,
+  gpsCueText,
+  hasSheetPin,
   isAreaDay1Done,
   isUntitledTag,
   hasDarkPhoto,
   leaveSiteBlockers,
+  mapImportRow,
   nextWalkGap,
   officePassItems,
   officePassReasons,
+  parseImportCsv,
   parseSpokenName,
   photoIndexCsv,
   placeOnSheetNote,
@@ -22,6 +26,7 @@ import {
   rushShotType,
   suggestAttachTarget,
   uniqueFacilities,
+  uniqueOfficeNames,
   walkGapText,
   walkGeoJson,
   walkLine
@@ -81,6 +86,9 @@ let lastSpokenAt = 0;
 let lastSheetPhotoId = null;
 let planPinXY = null;
 let planPinDrawing = null;
+let stickySheetMode = false;
+let lastSheetLoc = null;
+let lastSheetPinned = false;
 
 const COPY = {
   commercial: {
@@ -88,13 +96,13 @@ const COPY = {
     pill: 'O&G',
     banner: 'Oil & gas field notes — photograph equipment, tag it, and leave with a client-ready package.',
     emptyTitle: 'Start walking',
-    emptyBody: 'Snap first. We start a visit, pin GPS, and you can name tags when you catch your breath.',
+    emptyBody: 'Create a visit, or tap Snap — we start one. GPS is area-level. Sheet/grid is optional Skip.',
     emptyCta: 'Create First Visit',
     newVisitBtn: '+ Visit',
     completenessTitle: 'How complete is this visit?',
     readyBtn: "What's missing?",
     readyHeader: "What's missing?",
-    readyMeta: "Name untitled pins, retake dark shots, then leave with the package.",
+    readyMeta: "Name untitled pins, retake dark shots, then leave with the package. Sheet/grid is optional — For drawings if the office needs the pack.",
     readyAllGood: "You're good to leave",
     readyAllGoodBody: 'Required photos are in place. Leave site sends one client package.',
     readyBack: 'Back to Visit',
@@ -127,7 +135,7 @@ const COPY = {
     equipmentHeading: 'Equipment you documented',
     assignHelp: 'Tap the equipment, then tap the photos that belong to it.',
     clusterTitle: 'Suggested Areas',
-    clusterMeta: 'Grouped by GPS proximity. Rename them to match this plant.',
+    clusterMeta: 'Area-level GPS — not a sheet pin unless you place one. Nearby tags cluster into plant areas.',
     photosHelp: 'Every photo stored on this device.',
     searchPh: 'Search visits, tags, areas…',
     missingPhotos: (n) => n + ' still need photos',
@@ -195,6 +203,82 @@ const COPY = {
 
 function isDefense() { return productMode === 'defense'; }
 function copy() { return COPY[productMode] || COPY.commercial; }
+
+function isDemoVisit(v) {
+  return !!(v && (v.demo || v.id === 'fv-demo-walkdown' || /^\[Demo\]/i.test(String(v.title || ''))));
+}
+
+function fillDatalist(id, values) {
+  let el = $(id);
+  if (!el) {
+    el = document.createElement('datalist');
+    el.id = id;
+    document.body.appendChild(el);
+  }
+  el.innerHTML = (values || []).slice(0, 80).map((v) => '<option value="' + escapeHtml(v) + '"></option>').join('');
+}
+
+async function refreshOfficeSuggest() {
+  try {
+    const items = await dbGetAll(STORE_EQUIPMENT);
+    const { tags, pids } = uniqueOfficeNames(items);
+    fillDatalist('fv-tag-suggest', tags);
+    fillDatalist('fv-pid-suggest', pids);
+  } catch (e) {}
+}
+
+async function importTagsCsv(file) {
+  if (!file) return;
+  const visitId = await ensureVisitForCapture();
+  if (!visitId) { showToast('Create a visit first'); return; }
+  let text = '';
+  try { text = await file.text(); } catch (e) { showToast('Could not read that CSV'); return; }
+  const mapped = parseImportCsv(text).map(mapImportRow).filter((r) => r.tag);
+  if (!mapped.length) { showToast('No tags in that CSV'); return; }
+  const existing = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', visitId);
+  const now = Date.now();
+  let n = 0;
+  for (const row of mapped) {
+    const prior = existing.find((e) => String(e.tag || '').toLowerCase() === row.tag.toLowerCase());
+    if (prior) {
+      if (row.pid && !prior.pid) prior.pid = row.pid;
+      if (row.lat != null) prior.lat = row.lat;
+      if (row.lng != null) prior.lng = row.lng;
+      if (row.notes && !prior.notes) prior.notes = row.notes;
+      prior.updatedAt = now;
+      await dbPut(STORE_EQUIPMENT, prior);
+    } else {
+      const rec = {
+        id: uuid(),
+        visitId,
+        areaId: '',
+        tag: row.tag,
+        eqType: row.eqType || 'other',
+        locationDesc: row.area || '',
+        pid: row.pid || '',
+        notes: row.notes || '',
+        lat: row.lat,
+        lng: row.lng,
+        photos: [],
+        needsFollowup: false,
+        createdAt: now,
+        updatedAt: now,
+        source: row.source || 'csv'
+      };
+      existing.push(rec);
+      await dbPut(STORE_EQUIPMENT, rec);
+    }
+    n += 1;
+  }
+  const visit = await dbGet(STORE_VISITS, visitId);
+  if (visit) {
+    visit.updatedAt = now;
+    await dbPut(STORE_VISITS, visit);
+  }
+  void refreshOfficeSuggest();
+  showToast('Preloaded ' + n + ' tag' + (n === 1 ? '' : 's') + ' from CSV');
+  if (currentView === 'view-visit-detail') loadVisitDetail(visitId);
+}
 
 function setText(id, text) {
   const el = $(id);
@@ -356,7 +440,10 @@ function persistSession() {
       view: currentView,
       camera: cameraOpen,
       lastAttach,
-      sessionPinSeq
+      sessionPinSeq,
+      stickySheet: stickySheetMode,
+      lastSheetLoc,
+      lastSheetPinned
     }));
   } catch (e) {}
 }
@@ -371,6 +458,9 @@ function restoreSession() {
     if (s.eqType) selectedEqType = s.eqType;
     if (s.lastAttach) lastAttach = s.lastAttach;
     if (Number(s.sessionPinSeq)) sessionPinSeq = Number(s.sessionPinSeq);
+    if (s.stickySheet) stickySheetMode = true;
+    if (s.lastSheetLoc) lastSheetLoc = s.lastSheetLoc;
+    if (s.lastSheetPinned) lastSheetPinned = true;
     return s;
   } catch (e) { return null; }
 }
@@ -465,7 +555,7 @@ async function startRushCapture(shotId) {
 function updateCamChrome() {
   if ($('fv-cam-count')) $('fv-cam-count').textContent = String(sessionShotCount);
   if ($('fv-cam-gps')) {
-    $('fv-cam-gps').textContent = gpsDenied ? 'GPS blocked' : (lastFix ? gpsStatusText(lastFix) : 'GPS…');
+    $('fv-cam-gps').textContent = gpsDenied ? 'GPS blocked' : (lastFix ? gpsStatusText(lastFix) : 'Area GPS…');
   }
   const n = lastAttach?.photoCount;
   if ($('fv-cam-hint')) {
@@ -538,7 +628,9 @@ async function openFieldCameraUi() {
   }
   startCamListen();
   updateCamChrome();
-  updateCamAttach(currentEquipmentId ? 'Will add to the open tag' : 'GPS will pick the nearest pin');
+  updateCamAttach(currentEquipmentId ? 'Will add to the open tag' : 'Area GPS will pick the nearest pin');
+  if (stickySheetMode) showSheetPinChip();
+  void refreshOfficeSuggest();
   return true;
 }
 
@@ -574,6 +666,18 @@ function showSheetPinChip() {
   const el = $('fv-cam-sheet');
   if (!el) return;
   el.classList.remove('hidden');
+  el.classList.toggle('fv-cam-sheet-sticky', !!stickySheetMode);
+  const copyEl = el.querySelector('.fv-cam-sheet-copy');
+  const label = lastSheetLoc ? [lastSheetLoc.sheet, lastSheetLoc.grid].filter(Boolean).join(' ') : '';
+  if (copyEl) {
+    copyEl.textContent = stickySheetMode && label
+      ? ('Still on ' + label + '? Skip is one tap.')
+      : 'Pin on drawing? Optional. Skip keeps area GPS + tags.';
+  }
+  const keep = $('fv-cam-sheet-keep');
+  if (keep) keep.checked = !!stickySheetMode;
+  const same = $('fv-cam-sheet-same');
+  if (same) same.classList.toggle('hidden', !(lastSheetLoc && (lastSheetLoc.sheet || lastSheetLoc.grid || lastSheetLoc.drawingId)));
 }
 
 function closeSheetPinModals() {
@@ -583,9 +687,14 @@ function closeSheetPinModals() {
 }
 
 function prefillSheetFields() {
-  const pid = $('eq-pid')?.value?.trim() || '';
-  if ($('sheet-pin-name') && !$('sheet-pin-name').value) $('sheet-pin-name').value = pid;
-  if ($('plan-pin-sheet') && !$('plan-pin-sheet').value) $('plan-pin-sheet').value = pid;
+  const fromLast = lastSheetLoc || {};
+  const pid = $('eq-pid')?.value?.trim() || fromLast.sheet || '';
+  if ($('sheet-pin-name') && (stickySheetMode || !$('sheet-pin-name').value)) $('sheet-pin-name').value = pid;
+  if ($('plan-pin-sheet') && (stickySheetMode || !$('plan-pin-sheet').value)) $('plan-pin-sheet').value = pid;
+  if (fromLast.grid) {
+    if ($('sheet-pin-grid') && (stickySheetMode || !$('sheet-pin-grid').value)) $('sheet-pin-grid').value = fromLast.grid;
+    if ($('plan-pin-grid') && (stickySheetMode || !$('plan-pin-grid').value)) $('plan-pin-grid').value = fromLast.grid;
+  }
 }
 
 async function openSheetPinModal() {
@@ -640,10 +749,26 @@ async function applySheetLocation(loc) {
   if (!eq.pid && sheet.sheet) eq.pid = sheet.sheet;
   eq.updatedAt = Date.now();
   await dbPut(STORE_EQUIPMENT, eq);
+  lastSheetLoc = sheet;
+  lastSheetPinned = hasSheetPin({ sheet });
+  stickySheetMode = true;
+  persistSession();
   if ($('eq-sheet')) $('eq-sheet').value = sheet.sheet;
   if ($('eq-grid')) $('eq-grid').value = sheet.grid;
   if ($('eq-pid') && eq.pid) $('eq-pid').value = eq.pid;
+  void refreshOfficeSuggest();
   return true;
+}
+
+async function applyLastSheetPin() {
+  if (!lastSheetLoc || !(lastSheetLoc.sheet || lastSheetLoc.grid || lastSheetLoc.drawingId)) {
+    showToast('No last sheet yet — type one or Skip');
+    return;
+  }
+  const ok = await applySheetLocation(lastSheetLoc);
+  if (!ok) return;
+  hideSheetPinChip();
+  showToast('Pinned to ' + [lastSheetLoc.sheet, lastSheetLoc.grid].filter(Boolean).join(' '));
 }
 
 async function saveTypedSheetPin() {
@@ -1093,6 +1218,10 @@ async function smartAttachPhoto(shot) {
   };
   persistSession();
   attachGpsToLatestPhotos(target.eq.id, 1);
+  lastSheetPinned = hasSheetPin(target.eq);
+  if (target.eq.sheet && (target.eq.sheet.sheet || target.eq.sheet.grid || target.eq.sheet.drawingId)) {
+    lastSheetLoc = target.eq.sheet;
+  }
   if (currentView === 'view-equipment-detail' && !cameraOpen) {
     const fresh = await dbGet(STORE_EQUIPMENT, target.eq.id);
     if (fresh) {
@@ -1135,6 +1264,7 @@ function openNamePinModal() {
     }
     $('modal-name-pin')?.classList.remove('hidden');
     setTimeout(() => $('name-pin-tag')?.focus(), 80);
+    void refreshOfficeSuggest();
   });
 }
 
@@ -2117,7 +2247,7 @@ async function renderVisitsList(filter = '') {
     const score = visitReadinessScore(items);
     const noun = copy().itemsNoun;
     return `<div class="card" data-id="${v.id}">
-      <div class="card-title">${escapeHtml(v.title||'Untitled')}</div>
+      <div class="card-title">${escapeHtml(v.title||'Untitled')}${isDemoVisit(v) ? ' <span class="badge warn">Demo sample — not your plant</span>' : ''}</div>
       <div class="card-meta">
         <span>${formatDate(v.date)}</span>
         ${v.client ? `<span>${escapeHtml(v.client)}</span>` : ''}
@@ -2148,22 +2278,25 @@ function renderRushHero(visits, equipment) {
     hero.innerHTML = `
       <p class="rush-kicker">In the field</p>
       <h2 class="rush-title">Snap first. Name later.</h2>
-      <p class="rush-sub">Camera stays open. GPS pins each shot. Organize when you can.</p>
+      <p class="rush-sub">Create a visit or tap Snap. Camera stays open. Area GPS pins each shot. Organize when you can.</p>
       <div class="rush-actions">
         <button type="button" class="btn-primary btn-lg" id="rush-snap">Snap</button>
+        <button type="button" class="btn-secondary" id="rush-new">Create First Visit</button>
       </div>`;
     $('rush-snap')?.addEventListener('click', () => startFastTake());
+    $('rush-new')?.addEventListener('click', () => openVisitModal(false));
     return;
   }
   const items = (equipment || []).filter((e) => e.visitId === latest.id);
   const unnamed = items.filter((e) => isUntitledTag(e.tag)).length;
   const gap = nextWalkGap(items.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) })), lastFix?.lat, lastFix?.lng);
   const gapLine = gap ? walkGapText(gap) : '';
+  const demoBit = isDemoVisit(latest) ? 'Demo sample — not your plant. ' : '';
   hero.classList.remove('hidden');
   hero.innerHTML = `
-    <p class="rush-kicker">Continue this walk</p>
+    <p class="rush-kicker">${isDemoVisit(latest) ? 'Sample walk (not your plant)' : 'Continue this walk'}</p>
     <h2 class="rush-title">${escapeHtml(latest.title || 'Visit')}</h2>
-    <p class="rush-sub">${escapeHtml([latest.client, latest.facility].filter(Boolean).join(' · ') || 'On site')}${items.length ? ' · ' + items.length + ' tags' : ''}${unnamed ? ' · ' + unnamed + ' still untitled' : ''}</p>
+    <p class="rush-sub">${escapeHtml(demoBit + ([latest.client, latest.facility].filter(Boolean).join(' · ') || 'On site'))}${items.length ? ' · ' + items.length + ' tags' : ''}${unnamed ? ' · ' + unnamed + ' still untitled' : ''}</p>
     ${gapLine ? `<p class="rush-sub" id="rush-gap">${escapeHtml(gapLine)}</p>` : ''}
     <p class="rush-sub" id="rush-compass">${headingLabel() ? escapeHtml('Facing ' + headingLabel()) : ''}</p>
     <div class="rush-actions">
@@ -2457,6 +2590,7 @@ async function loadVisitDetail(id) {
   $('visit-detail-header').innerHTML = `
     <h2>${escapeHtml(visit.title)}</h2>
     <div class="meta">${formatDate(visit.date)}${visit.client ? ' · ' + escapeHtml(visit.client) : ''}${visit.facility ? ' · ' + escapeHtml(visit.facility) : ''}${visit.template ? ' · ' + escapeHtml(templateLabel(visit.template)) : ''}</div>
+    ${isDemoVisit(visit) ? '<p class="help-text">Demo sample — not your plant. Create a visit to start a real walk.</p>' : ''}
     ${visit.overallNotes ? `<p style="margin-top:10px;font-size:0.95rem">${escapeHtml(visit.overallNotes)}</p>` : ''}
   `;
 
@@ -2512,7 +2646,7 @@ async function loadVisitDetail(id) {
   if (equipment.length === 0) {
     eqList.innerHTML = `<div class="next-step-card">
       <h3>Snap as you walk</h3>
-      <p>Stand at the asset and tap Snap. We pin GPS. Name the tag later — or tap Name a tag if you already know it.</p>
+      <p>Stand at the asset and tap Snap. Area GPS pins the shot. Sheet/grid is optional Skip. Name the tag later.</p>
       <button type="button" class="btn-primary" id="btn-empty-snap">Snap</button>
     </div>`;
     $('btn-empty-snap')?.addEventListener('click', () => startFastTake());
@@ -2529,6 +2663,8 @@ async function loadVisitDetail(id) {
       });
     });
   }
+  persistSession();
+  void refreshOfficeSuggest();
 }
 
 function eqCardHtml(eq, areas) {
@@ -2552,6 +2688,7 @@ function eqCardHtml(eq, areas) {
       ${miss.length ? `<span>Still needs: ${escapeHtml(miss.map(s => s.label).join(', '))}</span>` : ''}
       ${eq.locationDesc ? `<span>${escapeHtml(eq.locationDesc)}</span>` : ''}
       ${eq.lat!=null && eq.lng!=null ? `<span class="coords-display">${Number(eq.lat).toFixed(5)}, ${Number(eq.lng).toFixed(5)}</span>` : ''}
+      ${hasSheetPin(eq) ? '<span>On sheet</span>' : ((eq.photos||[]).length ? '<span>Area GPS</span>' : '')}
     </div>
   </div>`;
 }
@@ -2580,8 +2717,10 @@ function renderCompleteness(items) {
   if (items.length - withCoords > 0) warnings.push(c.missingGps(items.length - withCoords));
   const untitled = items.filter((e) => isUntitledTag(e.tag)).length;
   const dark = items.filter((e) => hasDarkPhoto(e)).length;
+  const unpinned = items.filter((e) => (e.photos || []).length && !hasSheetPin(e)).length;
   if (untitled) warnings.push(untitled + ' still need a name');
   if (dark) warnings.push(dark + ' dark photo' + (dark === 1 ? '' : 's') + ' to retake');
+  if (unpinned) warnings.push(unpinned + ' not on a sheet/grid (optional — Skip is fine)');
   $('completeness-warnings').innerHTML = warnings.map(w => '<div>'+w+'</div>').join('');
 }
 
@@ -2589,14 +2728,17 @@ async function openReadyCheck() {
   const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
   showView('view-ready-check');
   $('header-title').textContent = isDefense() ? 'Processing Check' : 'Punch list';
+  void refreshOfficeSuggest();
   const list = $('ready-list');
   const c = copy();
   const annotated = items.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) }));
   const hard = officePassItems(annotated);
   if (hard.length === 0) {
     list.innerHTML = `<div class="empty-state"><h2>${escapeHtml(c.readyAllGood)}</h2><p>${escapeHtml(c.readyAllGoodBody)}</p>
-      <button type="button" class="btn-primary btn-lg" id="btn-leave-clean">Leave site — send to client</button></div>`;
+      <button type="button" class="btn-primary btn-lg" id="btn-leave-clean">Leave site — send to client</button>
+      <button type="button" class="btn-secondary" id="btn-drawings-clean">For drawings</button></div>`;
     $('btn-leave-clean')?.addEventListener('click', () => void leaveSite({ force: true }));
+    $('btn-drawings-clean')?.addEventListener('click', () => void exportDrawingPackage());
     return;
   }
   const cards = hard.map(eq => {
@@ -2608,8 +2750,8 @@ async function openReadyCheck() {
     return `<div class="card danger-border punch-card" data-id="${eq.id}">
       <div class="card-title"><span class="tag-badge">${escapeHtml(eq.tag||'?')}</span></div>
       <div class="card-meta">${reasons.map((r) => r.label).join(' · ')}</div>
-      ${untitled ? `<div class="punch-rename-row">
-        <input type="text" class="punch-rename" data-id="${eq.id}" placeholder="e.g. P-101" enterkeyhint="done">
+        ${untitled ? `<div class="punch-rename-row">
+        <input type="text" class="punch-rename" list="fv-tag-suggest" data-id="${eq.id}" placeholder="e.g. P-101" enterkeyhint="done">
         <button type="button" class="btn-primary btn-sm punch-save-name" data-id="${eq.id}">Name</button>
       </div>` : ''}
       <div class="punch-actions">
@@ -2687,7 +2829,8 @@ async function leaveSite(opts = {}) {
     openReadyCheck();
     return;
   }
-  await exportVisitPackage({ share: true, client: true });
+  const unpinned = annotated.filter((eq) => officePassReasons(eq).some((r) => r.id === 'unpinned')).length;
+  await exportVisitPackage({ share: true, client: true, unpinned });
 }
 
 async function deleteVisit() {
@@ -2868,7 +3011,10 @@ async function loadEquipmentDetail(id) {
   renderEqPager();
   renderCrumbs();
   renderVoiceNotes(eq.voiceNotes || []);
+  lastSheetPinned = hasSheetPin(eq);
+  if (eq.sheet && (eq.sheet.sheet || eq.sheet.grid || eq.sheet.drawingId)) lastSheetLoc = eq.sheet;
   persistSession();
+  void refreshOfficeSuggest();
 }
 
 function updatePromptChecks(photos) {
@@ -2989,19 +3135,22 @@ function gpsErrorMessage(err) {
 function gpsToast(fix) {
   if (!fix) return 'Location saved';
   const m = Math.round(fix.acc);
-  return m <= 25 ? 'Location ±' + m + ' m' : 'Location captured (±' + m + ' m). Stay still for a tighter fix.';
+  return m <= 25
+    ? 'Area GPS ±' + m + ' m' + (lastSheetPinned ? ' · on sheet' : '')
+    : 'Area GPS captured (±' + m + ' m). Stay still for a tighter fix.';
 }
 function gpsStatusText(fix) {
-  if (!fix) return 'No GPS yet';
-  const age = Math.round((Date.now() - fix.at) / 1000);
-  const ageStr = age < 5 ? 'just now' : age < 60 ? age + 's ago' : Math.round(age / 60) + ' min ago';
-  return '±' + Math.round(fix.acc) + ' m · ' + ageStr;
+  return gpsCueText(fix, {
+    waiting: !fix,
+    sheetPinned: lastSheetPinned,
+    now: Date.now()
+  });
 }
 function updateGpsStatusUi() {
   const el = $('gps-status');
-  if (el) el.textContent = lastFix ? gpsStatusText(lastFix) : 'Tap GPS to capture this spot';
+  if (el) el.textContent = lastFix ? gpsStatusText(lastFix) : 'Tap GPS to capture this area';
   if ($('fv-cam-gps')) {
-    $('fv-cam-gps').textContent = gpsDenied ? 'GPS blocked' : (lastFix ? gpsStatusText(lastFix) : 'GPS…');
+    $('fv-cam-gps').textContent = gpsDenied ? 'GPS blocked' : (lastFix ? gpsStatusText(lastFix) : 'Area GPS…');
   }
   renderGpsBanner();
   if (cameraOpen) void refreshCamAttachPreview();
@@ -4353,7 +4502,10 @@ async function exportVisitPackage(opts = {}) {
   if (!visit) return;
   const areas = await dbGetByIndex(STORE_AREAS, 'visitId', currentVisitId);
   const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
-  showToast('Building export…');
+  const n = Number(opts.unpinned) || 0;
+  showToast(n
+    ? n + ' pin' + (n === 1 ? '' : 's') + ' not on a sheet — Skip is fine. Building client package…'
+    : 'Building export…');
 
   const zip = new JSZip();
   const areaMap = Object.fromEntries(areas.map(a => [a.id, a.name]));
@@ -4603,6 +4755,18 @@ function initEvents() {
     try { localStorage.setItem('fieldvault_coach', '1'); } catch (e) {}
     renderCoach(latestVisitId ? 1 : 0);
   });
+  $('btn-coach-demo')?.addEventListener('click', () => {
+    void seedFieldVaultDemo().then((ok) => {
+      if (ok) {
+        try { localStorage.setItem('fieldvault_coach', '1'); } catch (e) {}
+        renderCoach(1);
+        renderVisitsList();
+      }
+    });
+  });
+  $('btn-load-demo')?.addEventListener('click', () => {
+    void seedFieldVaultDemo().then((ok) => { if (ok) renderVisitsList(); });
+  });
   $('tile-add-eq')?.addEventListener('click', () => openNewEquipment(false));
   $('btn-sticky-take')?.addEventListener('click', () => startFastTake(stickyNextShotId));
   $('tile-quick')?.addEventListener('click', openQuickCapture);
@@ -4777,9 +4941,25 @@ function initEvents() {
   $('more-export')?.addEventListener('click', () => { setMoreOpen(false); void exportVisitPackage(); });
   $('more-drawings')?.addEventListener('click', () => { setMoreOpen(false); void exportDrawingPackage(); });
   $('btn-export-drawings')?.addEventListener('click', () => void exportDrawingPackage());
+  $('btn-export-drawings-ready')?.addEventListener('click', () => void exportDrawingPackage());
+  $('more-import-csv')?.addEventListener('click', () => {
+    setMoreOpen(false);
+    $('import-tags-csv')?.click();
+  });
+  $('import-tags-csv')?.addEventListener('change', (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (f) void importTagsCsv(f);
+  });
   $('fv-cam-sheet-skip')?.addEventListener('click', () => hideSheetPinChip());
+  $('fv-cam-sheet-same')?.addEventListener('click', () => void applyLastSheetPin());
   $('fv-cam-sheet-type')?.addEventListener('click', () => void openSheetPinModal());
   $('fv-cam-sheet-plan')?.addEventListener('click', () => void openPlanPinModal());
+  $('fv-cam-sheet-keep')?.addEventListener('change', (e) => {
+    stickySheetMode = !!e.target.checked;
+    persistSession();
+    if (cameraOpen) showSheetPinChip();
+  });
   $('btn-sheet-pin-close')?.addEventListener('click', closeSheetPinModals);
   $('btn-sheet-pin-skip')?.addEventListener('click', closeSheetPinModals);
   $('btn-sheet-pin-save')?.addEventListener('click', () => void saveTypedSheetPin());
@@ -4863,6 +5043,7 @@ async function init() {
     const session = restoreSession();
     if (currentVisitId) latestVisitId = currentVisitId;
     await restoreLastPlace(session);
+    void refreshOfficeSuggest();
   } catch (err) {
     console.error(err);
     alert('Failed to start FieldVault');
@@ -4909,7 +5090,10 @@ async function demoPhoto(promptType, label, color, lat, lng) {
 export async function seedFieldVaultDemo() {
   if (!db) await openDB();
   const existing = await dbGetAll(STORE_VISITS);
-  if (existing.length) return false;
+  if (existing.length) {
+    showToast('A visit is already on this phone — demo not loaded');
+    return false;
+  }
 
   const now = Date.now();
   const visitId = 'fv-demo-walkdown';
@@ -4926,12 +5110,13 @@ export async function seedFieldVaultDemo() {
 
   await dbPut(STORE_VISITS, {
     id: visitId,
-    title: 'Crude unit walkdown',
+    title: '[Demo] Crude unit walkdown',
     client: 'Gulf Coast Refining',
     facility: 'Crude unit',
     date: new Date().toISOString().slice(0, 10),
-    overallNotes: 'Sample visit. P-101 is nearly leave-ready. XV-402 still needs photos and a GPS pin.',
+    overallNotes: 'DEMO SAMPLE — not your plant. P-101 is nearly leave-ready. XV-402 still needs photos and a GPS pin.',
     template: 'walkdown',
+    demo: true,
     createdAt: now,
     updatedAt: now
   });
@@ -5033,7 +5218,7 @@ export async function seedFieldVaultDemo() {
 
   latestVisitId = visitId;
   await renderVisitsList();
-  showToast('Sample crude-unit walkdown loaded');
+  showToast('Demo sample loaded — not your plant. Create a visit to start a real walk.');
   return true;
 }
 

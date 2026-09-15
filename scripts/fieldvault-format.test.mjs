@@ -12,6 +12,7 @@ import {
   coverageSummary,
   isAreaDay1Done,
   uniqueFacilities,
+  uniqueOfficeNames,
   walkGeoJson,
   walkLine,
   nearestByGps,
@@ -21,6 +22,10 @@ import {
   officePassItems,
   officePassReasons,
   leaveSiteBlockers,
+  LEAVE_SITE_SOFT_REASONS,
+  hasSheetPin,
+  gpsCueText,
+  parseImportCsv,
   hasWeakGps,
   equipmentCsv,
   photoIndexCsv,
@@ -103,10 +108,11 @@ test("nameplate parse pulls a plant tag", () => {
 });
 
 test("import rows map GPS without the 0.002 sketch hack", () => {
-  const row = mapImportRow({ name: "P-101", latitude: 29.7, longitude: -95.1, notes: "charge" });
+  const row = mapImportRow({ name: "P-101", latitude: 29.7, longitude: -95.1, notes: "charge", pid: "P&ID-CU-101" });
   assert.equal(row.tag, "P-101");
   assert.equal(row.lat, 29.7);
   assert.equal(row.lng, -95.1);
+  assert.equal(row.pid, "P&ID-CU-101");
 });
 
 test("suggestAttachTarget stays, splits on move, and waits", () => {
@@ -166,11 +172,12 @@ test("office pass and walk-order helpers", () => {
     { tag: "P-101", photos: [{ note: "" }], lat: 1, lng: 2 },
     { tag: "Pin 1", photos: [{ note: "Possibly dark" }], lat: null, lng: null },
   ]);
-  assert.equal(items[0].tag, "Pin 1");
-  const reasons = officePassReasons(items[0]).map((r) => r.id);
+  assert.ok(items.some((e) => e.tag === "Pin 1"));
+  const reasons = officePassReasons(items.find((e) => e.tag === "Pin 1")).map((r) => r.id);
   assert.ok(reasons.includes("untitled"));
   assert.ok(reasons.includes("dark"));
   assert.ok(reasons.includes("gps"));
+  assert.ok(officePassReasons({ tag: "P-101", photos: [{ note: "" }], lat: 1, lng: 2 }).some((r) => r.id === "unpinned"));
   const blurry = officePassReasons({ tag: "P-101", photos: [{ note: "Blurry" }], lat: 1, lng: 2 });
   assert.ok(blurry.some((r) => r.id === "blur"));
 });
@@ -248,7 +255,9 @@ test("optional two-day coverage uses areas on one visit and keeps punch items", 
   assert.equal(coverageSummary(unused), "");
   assert.ok(unused.punchOpen.some((e) => e.tag === "V-301"));
   assert.ok(unused.punchOpen.some((e) => e.tag === "XV-402"));
-  assert.ok(!unused.punchOpen.some((e) => e.tag === "P-101"));
+  assert.ok(unused.punchOpen.some((e) => e.tag === "P-101"));
+  assert.ok(officePassReasons(items.find((e) => e.tag === "P-101")).every((r) => LEAVE_SITE_SOFT_REASONS.has(r.id)));
+  assert.ok(!leaveSiteBlockers(items).some((e) => e.tag === "P-101"));
 
   const used = coverageByArea(
     areas.map((a) => (a.id === "pumps" ? { ...a, day1Done: true } : a)),
@@ -268,7 +277,7 @@ test("optional two-day coverage uses areas on one visit and keeps punch items", 
   assert.ok(used.punchOpen.some((e) => e.tag === "XV-402"));
   assert.match(coverageSummary(used), /Day 1: 1 area done/);
   assert.match(coverageSummary(used), /Day 2: 2 remaining/);
-  assert.match(coverageSummary(used), /2 punch items still open on this visit/);
+  assert.match(coverageSummary(used), /3 punch items still open on this visit/);
 });
 
 test("per-shot heading and gps_acc land on CSV, GeoJSON, and punch list without blocking leave", () => {
@@ -320,6 +329,9 @@ test("per-shot heading and gps_acc land on CSV, GeoJSON, and punch list without 
   assert.ok(weakReasons.includes("weakgps"));
   assert.ok(!officePassReasons(eq).some((r) => r.id === "weakgps"));
   assert.ok(!officePassReasons(eq).some((r) => r.id === "heading"));
+  assert.ok(officePassReasons(eq).some((r) => r.id === "unpinned"));
+  assert.ok(LEAVE_SITE_SOFT_REASONS.has("unpinned"));
+  assert.ok(LEAVE_SITE_SOFT_REASONS.has("weakgps"));
   assert.equal(leaveSiteBlockers([eq, weak]).length, 0);
   assert.equal(nextWalkGap([eq, weak], 29.7, -95), null);
   assert.ok(officePassItems([eq, weak]).some((e) => e.tag === "XV-402"));
@@ -328,6 +340,7 @@ test("per-shot heading and gps_acc land on CSV, GeoJSON, and punch list without 
 
 test("optional sheet location is skippable and serializes for drawings", () => {
   const bare = { tag: "P-101", photos: [{}] };
+  assert.equal(hasSheetPin(bare, bare.photos[0]), false);
   assert.deepEqual(sheetLocation(bare, bare.photos[0]), {
     sheet: "",
     grid: "",
@@ -345,9 +358,37 @@ test("optional sheet location is skippable and serializes for drawings", () => {
   assert.equal(loc.sheet, "P&ID-CU-101");
   assert.equal(loc.grid, "C-4");
   assert.equal(loc.planX, 0.42);
+  assert.equal(hasSheetPin(pinned, pinned.photos[0]), true);
+  assert.ok(!officePassReasons({ ...pinned, lat: 1, lng: 2 }).some((r) => r.id === "unpinned"));
+  assert.ok(leaveSiteBlockers([{ ...pinned, lat: 1, lng: 2, photos: pinned.photos }]).length === 0);
   const csv = equipmentCsv([pinned], [], () => "photos/x.jpg");
   assert.match(csv, /"C-4"/);
   assert.match(csv, /"0.42"/);
+});
+
+test("GPS cue is area-level unless sheet-pinned", () => {
+  const fix = { acc: 12, at: 1_000 };
+  assert.equal(gpsCueText(null, { waiting: true }), "Area GPS…");
+  assert.equal(gpsCueText(null, { denied: true }), "GPS blocked");
+  assert.match(gpsCueText(fix, { now: 1_000 }), /^Area GPS ±12 m/);
+  assert.match(gpsCueText(fix, { now: 1_000, sheetPinned: true }), /^On sheet · Area GPS ±12 m/);
+});
+
+test("office tag and P&ID suggest plus CSV preload via mapImportRow", () => {
+  const names = uniqueOfficeNames([
+    { tag: "P-101", pid: "P&ID-CU-101" },
+    { tag: "Pin 3", pid: "P&ID-CU-101" },
+    { tag: "E-210", sheet: { sheet: "P&ID-CU-210" } },
+  ]);
+  assert.deepEqual(names.tags.sort(), ["E-210", "P-101"]);
+  assert.ok(names.pids.includes("P&ID-CU-101"));
+  assert.ok(names.pids.includes("P&ID-CU-210"));
+  const row = mapImportRow({ tag: "XV-402", pid: "P&ID-CU-101", lat: 29.7, lng: -95 });
+  assert.equal(row.pid, "P&ID-CU-101");
+  const parsed = parseImportCsv("tag,pid,area\nP-101,P&ID-CU-101,Pumps\nE-210,P&ID-CU-210,Vessels");
+  assert.equal(parsed.length, 2);
+  assert.equal(mapImportRow(parsed[0]).tag, "P-101");
+  assert.equal(mapImportRow(parsed[0]).pid, "P&ID-CU-101");
 });
 
 test("dHash and blur helpers", () => {

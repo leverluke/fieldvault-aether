@@ -31,7 +31,7 @@ export function GpsDemo() {
     { x: 34, y: 48, acc: 12 },
     { x: 72, y: 30, acc: 9 },
   ]);
-  const [status, setStatus] = useState("Last fix ±8 m");
+  const [status, setStatus] = useState("Area GPS ±8 m");
   const groups = cluster(points);
 
   function capture() {
@@ -40,7 +40,7 @@ export function GpsDemo() {
     const ny = Math.min(88, Math.max(12, last.y + (Math.random() * 16 - 7)));
     const acc = Math.round(6 + Math.random() * 14);
     setPoints((p) => [...p, { x: nx, y: ny, acc }]);
-    setStatus(`Location ±${acc} m · just now`);
+    setStatus(`Area GPS ±${acc} m · just now`);
   }
 
   return (
@@ -98,11 +98,11 @@ export function GpsDemo() {
           ))}
         </svg>
         <p className="pointer-events-none absolute left-3 top-3 text-xs uppercase tracking-wider text-muted">
-          {groups.length} areas · {points.length} tags
+          Area GPS · {groups.length} areas · {points.length} tags
         </p>
       </div>
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm text-muted">Nearby points become a suggested area.</p>
+        <p className="text-sm text-muted">Area-level GPS. Nearby tags cluster into plant areas — not a sheet pin.</p>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={() => setPoints([{ x: 28, y: 42, acc: 8 }])}>
             Clear

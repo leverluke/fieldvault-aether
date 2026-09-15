@@ -19,7 +19,7 @@ function AppsIndex() {
         {WORK.map((w) => (
           <li key={w.slug} className="a-line">
             <a
-              href={`/apps/${w.slug}`}
+              href={w.playHref ?? `/apps/${w.slug}`}
               className="grid gap-6 py-8 sm:grid-cols-12 sm:items-center"
             >
               <div className="sm:col-span-4">
@@ -28,7 +28,7 @@ function AppsIndex() {
               </div>
               <p className="text-sm leading-relaxed text-muted sm:col-span-5">{w.dek}</p>
               <p className="text-sm text-primary sm:col-span-3 sm:text-right">
-                Open
+                {w.cta?.label ?? "Open"}
               </p>
             </a>
           </li>

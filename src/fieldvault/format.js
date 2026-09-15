@@ -154,6 +154,25 @@ export function sheetLocation(eq, photo) {
   };
 }
 
+export function hasSheetPin(eq, photo) {
+  const loc = sheetLocation(eq, photo);
+  return !!(loc.sheet || loc.grid || loc.drawingId);
+}
+
+/** Area-level GPS cue unless the last pin is on a sheet/grid. */
+export function gpsCueText(fix, opts = {}) {
+  if (opts.denied) return "GPS blocked";
+  if (!fix) return opts.waiting ? "Area GPS…" : "No GPS yet";
+  const now = opts.now != null ? Number(opts.now) : Date.now();
+  const at = Number(fix.at);
+  const age = Number.isFinite(at) ? Math.max(0, Math.round((now - at) / 1000)) : 0;
+  const ageStr = age < 5 ? "just now" : age < 60 ? age + "s ago" : Math.round(age / 60) + " min ago";
+  const acc = Number(fix.acc);
+  const accBit = Number.isFinite(acc) ? " ±" + Math.round(acc) + " m" : "";
+  const body = "Area GPS" + accBit + " · " + ageStr;
+  return opts.sheetPinned ? "On sheet · " + body : body;
+}
+
 export function geoJsonPointProperties(eq, photo, areas) {
   const areaMap = Object.fromEntries((areas || []).map((a) => [a.id, a.name]));
   const loc = sheetLocation(eq, photo);
@@ -440,6 +459,7 @@ export function officePassReasons(eq) {
     if (hasNoteFlag(eq, /blur/i)) reasons.push({ id: "blur", label: "Blurry — retake" });
     if (hasNoteFlag(eq, /duplicate/i)) reasons.push({ id: "dup", label: "Looks like a duplicate" });
     if (hasNoteFlag(eq, /leak/i)) reasons.push({ id: "leak", label: "Possible leak / rust" });
+    if (!hasSheetPin(eq)) reasons.push({ id: "unpinned", label: "Not on a sheet / grid" });
   }
   if (eq?.lat == null || eq?.lng == null) reasons.push({ id: "gps", label: "No GPS" });
   else if (hasWeakGps(eq)) {
@@ -458,8 +478,8 @@ export function officePassItems(items) {
   return (items || []).filter((eq) => officePassReasons(eq).length > 0).sort(compareEquipmentWalkOrder);
 }
 
-/** Punch-list hints that should not stop Leave site (weak GPS, never heading). */
-export const LEAVE_SITE_SOFT_REASONS = new Set(["weakgps"]);
+/** Punch-list hints that should not stop Leave site (weak GPS, unpinned sheet, never heading). */
+export const LEAVE_SITE_SOFT_REASONS = new Set(["weakgps", "unpinned"]);
 
 export function leaveSiteBlockers(items) {
   return (items || [])
@@ -563,14 +583,14 @@ export function suggestAttachTarget(opts = {}) {
 }
 
 export function attachPreviewText(suggestion) {
-  if (!suggestion) return "GPS will pick the nearest pin";
+  if (!suggestion) return "Area GPS will pick the nearest pin";
   if (suggestion.how === "pin") {
     if (suggestion.reason === "moved") {
-      return "New pin · you moved " + Math.round(suggestion.moved) + " m";
+      return "New pin in this area · you moved " + Math.round(suggestion.moved) + " m";
     }
-    if (suggestion.reason === "waited") return "New pin · been a minute";
+    if (suggestion.reason === "waited") return "New pin in this area · been a minute";
     if (suggestion.reason === "forced") return "Next snap starts a new pin";
-    return "New pin at this spot";
+    return "New pin in this area";
   }
   const tag = suggestion.eq?.tag || "this tag";
   const d = suggestion.dist != null ? " · " + Math.round(suggestion.dist) + " m" : "";
@@ -596,6 +616,41 @@ export function uniqueFacilities(visits) {
     out.push({ client: v.client || "", facility: v.facility || "" });
   }
   return out;
+}
+
+/** Prior plant tags and P&ID / sheet names for datalist suggest. */
+export function uniqueOfficeNames(items) {
+  const tags = [];
+  const pids = [];
+  const seenT = new Set();
+  const seenP = new Set();
+  for (const e of items || []) {
+    const tag = String(e.tag || "").trim();
+    if (tag && !isUntitledTag(tag)) {
+      const k = tag.toLowerCase();
+      if (!seenT.has(k)) {
+        seenT.add(k);
+        tags.push(tag);
+      }
+    }
+    const parsed = parseNameplateText(e.tag || e.notes || "");
+    if (parsed.tag) {
+      const k = parsed.tag.toLowerCase();
+      if (!seenT.has(k)) {
+        seenT.add(k);
+        tags.push(parsed.tag);
+      }
+    }
+    const pid = String(e.pid || sheetLocation(e).sheet || "").trim();
+    if (pid) {
+      const k = pid.toLowerCase();
+      if (!seenP.has(k)) {
+        seenP.add(k);
+        pids.push(pid);
+      }
+    }
+  }
+  return { tags, pids };
 }
 
 export function parseNameplateText(raw) {
@@ -708,13 +763,60 @@ export function mapImportRow(row) {
   const tag = String(r.tag || r.name || r.equipment || r.title || "").trim();
   const lat = Number(r.lat ?? r.latitude);
   const lng = Number(r.lng ?? r.lon ?? r.longitude);
+  const pid = String(r.pid || r.pandid || r.drawing || r.sheet || "").trim();
   return {
     tag,
     notes: String(r.notes || r.area || r.v || ""),
     area: String(r.area || ""),
     eqType: String(r.eqType || r.type || r.kind || "other"),
+    pid,
     lat: Number.isFinite(lat) ? lat : null,
     lng: Number.isFinite(lng) ? lng : null,
     source: String(r.source || "import"),
   };
+}
+
+/** Split CSV/TSV into row objects for mapImportRow (optional tag preload). */
+export function parseImportCsv(text) {
+  const lines = String(text || "")
+    .split(/\r?\n/)
+    .filter((l) => l.trim());
+  if (!lines.length) return [];
+  const splitLine = (line) => {
+    const out = [];
+    let cur = "";
+    let q = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (q && line[i + 1] === '"') {
+          cur += '"';
+          i += 1;
+        } else q = !q;
+      } else if ((ch === "," || ch === "\t") && !q) {
+        out.push(cur.trim());
+        cur = "";
+      } else cur += ch;
+    }
+    out.push(cur.trim());
+    return out;
+  };
+  const header = splitLine(lines[0]).map((h) => h.replace(/^"|"$/g, "").toLowerCase());
+  const looksHeader = header.some((h) => /^(tag|name|equipment|title|pid|sheet|area|lat|lng)$/.test(h));
+  const keys = looksHeader ? header : null;
+  const start = looksHeader ? 1 : 0;
+  const rows = [];
+  for (let i = start; i < lines.length; i++) {
+    const cells = splitLine(lines[i]);
+    if (keys) {
+      const row = {};
+      keys.forEach((k, j) => {
+        row[k] = cells[j];
+      });
+      rows.push(row);
+    } else {
+      rows.push({ tag: cells[0], pid: cells[1], area: cells[2] });
+    }
+  }
+  return rows;
 }

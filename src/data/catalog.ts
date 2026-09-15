@@ -37,9 +37,9 @@ export const WORK: WorkItem[] = [
     kicker: "Site capture",
     dek: "Snap the unit. Pin it on the map. Leave with one package the office can send.",
     status: "Live prototype",
-    hero: "A phone-first notebook for facility documentation. FixPlot, WalkScore, and the deliverable pipeline live inside this preview — they are views of the same product.",
+    hero: "The live walk is Open walkdown. Widgets on this page are samples — a stranger starts at /play: Create First Visit, Snap, optional sheet pin, Leave or For drawings.",
     summary:
-      "FieldVault is the walkdown tool. Guided shots, last-known GPS (FixPlot), completeness scoring (WalkScore), and a named export are all here — not separate apps.",
+      "FieldVault is the walkdown tool. Open walkdown for a real visit. Guided shots, area-level GPS (FixPlot — not a sheet pin unless you place one), completeness scoring (WalkScore), and a named export live in /play — not these brochure widgets.",
     heroImage: "/media/fieldvault-ui.png",
     views: [
       {
@@ -52,7 +52,7 @@ export const WORK: WorkItem[] = [
       {
         id: "fixplot",
         label: "FixPlot",
-        caption: "Drop noisy GPS the way a walk actually happens. Nearby tags cluster into plant areas.",
+        caption: "Area-level GPS. Nearby tags cluster into plant areas — not a drawing pin unless you place one.",
         image: "/media/fieldvault-gps-ui.png",
         demo: "gps",
       },
@@ -78,7 +78,7 @@ export const WORK: WorkItem[] = [
       },
       {
         title: "FixPlot GPS",
-        body: "Last-known fix on the equipment. Nearby points become a suggested area.",
+        body: "Last-known fix is area-level unless you pin a sheet. Nearby points become a suggested plant area.",
       },
       {
         title: "WalkScore",

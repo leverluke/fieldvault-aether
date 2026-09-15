@@ -29,6 +29,11 @@ export function sheetLocation(
   eq?: { sheet?: { sheet?: string; name?: string; grid?: string; x?: number; y?: number; drawingId?: string } | null; pid?: string } | null,
   photo?: { sheet?: { sheet?: string; name?: string; grid?: string; x?: number; y?: number; drawingId?: string } | null } | null,
 ): { sheet: string; grid: string; planX: number | ""; planY: number | ""; drawingId: string };
+export function hasSheetPin(eq?: unknown, photo?: unknown): boolean;
+export function gpsCueText(
+  fix?: { acc?: number; at?: number } | null,
+  opts?: { denied?: boolean; waiting?: boolean; sheetPinned?: boolean; now?: number },
+): string;
 export const EQUIPMENT_CSV_HEADER: string[];
 export const PHOTO_INDEX_HEADER: string[];
 export function equipmentCsvRow(eq: unknown, photo?: unknown, extras?: { area?: string; readiness?: unknown; photoFile?: string }): unknown[];
@@ -99,6 +104,7 @@ export function uniqueFacilities(visits: Array<{ client?: string; facility?: str
   client: string;
   facility: string;
 }>;
+export function uniqueOfficeNames(items: unknown[]): { tags: string[]; pids: string[] };
 export function parseNameplateText(raw: string): {
   text?: string;
   tag?: string;
@@ -111,10 +117,12 @@ export function mapImportRow(row: unknown): {
   notes: string;
   area: string;
   eqType: string;
+  pid: string;
   lat: number | null;
   lng: number | null;
   source: string;
 };
+export function parseImportCsv(text: string): Array<Record<string, string>>;
 export function parseSpokenTag(raw: string): string;
 export function parseSpokenName(raw: string): string;
 export function nextWalkGap<T>(
