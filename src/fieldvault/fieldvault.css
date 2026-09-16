@@ -642,6 +642,7 @@ body.commercial-mode #mode-banner { display: none; }
 body.commercial-mode #btn-model-mode { display: none; }
 body.defense-mode .action-grid { display: none; }
 body.defense-mode .coach-card { display: none; }
+body.defense-mode .fv-cam-coach { display: none !important; }
 body.commercial-mode .tile-dup-map,
 body.commercial-mode .tile-dup-qc { display: none; }
 
@@ -653,6 +654,12 @@ body.commercial-mode .tile-dup-qc { display: none; }
   margin-bottom: 16px;
 }
 .coach-card h2 { font-size: 1.05rem; margin-bottom: 10px; }
+.coach-line {
+  margin: 0 0 12px;
+  color: var(--text);
+  font-size: 0.95rem;
+  line-height: 1.45;
+}
 .coach-steps {
   margin: 0 0 14px 18px;
   color: var(--text-muted);
@@ -661,6 +668,42 @@ body.commercial-mode .tile-dup-qc { display: none; }
 }
 .coach-steps li { margin-bottom: 6px; }
 .coach-steps strong { color: var(--text); }
+.btn-link {
+  background: none;
+  border: 0;
+  padding: 8px 0;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.88rem;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.btn-link:hover { color: var(--text); }
+.demo-treat {
+  margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.demo-kicker {
+  margin: 0 0 4px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+#rush-hero:not(.hidden) ~ #visits-empty .empty-icon,
+#rush-hero:not(.hidden) ~ #visits-empty h2,
+#rush-hero:not(.hidden) ~ #visits-empty #visits-empty-body,
+#rush-hero:not(.hidden) ~ #visits-empty #btn-empty-new {
+  display: none;
+}
+#visits-empty .btn-lg { margin-top: 12px; }
+.punch-soft {
+  border-color: var(--border);
+}
+.punch-soft .card-meta { color: var(--text-muted); }
 
 .action-grid {
   display: grid;
@@ -1180,7 +1223,7 @@ body.defense-mode .app-header { background: #10161c; }
 .fv-cam-top { padding-top: max(10px, var(--safe-top)); }
 .fv-cam-dock {
   margin-top: auto;
-  justify-content: space-around;
+  justify-content: center;
   padding-bottom: max(18px, var(--safe-bottom));
   background: linear-gradient(0deg, rgba(0,0,0,0.78), rgba(0,0,0,0.18));
 }
@@ -1240,9 +1283,54 @@ body.defense-mode .app-header { background: #10161c; }
   display: flex;
   flex-direction: column;
   gap: 8px;
+  align-items: stretch;
 }
+.coach-actions .btn-link { text-align: center; }
 #visits-empty .btn-secondary {
   margin-top: 10px;
+}
+.fv-cam-coach {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 8px 14px 0;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: rgba(0,0,0,0.72);
+  border: 1px solid rgba(143, 184, 201, 0.45);
+}
+.fv-cam-coach p {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #eef2f5;
+}
+.fv-cam-coach .fv-cam-textbtn {
+  min-height: 40px;
+  min-width: 72px;
+  font-size: 0.82rem;
+}
+.fv-cam-coach.hidden { display: none !important; }
+.fv-cam-actions {
+  position: relative;
+  z-index: 2;
+  margin: 8px 14px 0;
+}
+.fv-cam-actions.hidden { display: none !important; }
+.fv-cam-shot-btns {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.fv-cam-shot-btns .fv-cam-textbtn {
+  min-height: 44px;
+  min-width: 0;
+  flex: 1;
+  font-size: 0.85rem;
 }
 .fv-cam-sheet-copy {
   margin: 0 0 8px;
@@ -1389,6 +1477,7 @@ body.fv-cam-open .crumb-bar {
   text-shadow: 0 1px 4px rgba(0,0,0,0.7);
 }
 .fv-cam-listen.off { color: #9aa7b0; }
+.fv-cam-listen.hidden { display: none !important; }
 .fv-cam-issues {
   position: relative;
   z-index: 2;

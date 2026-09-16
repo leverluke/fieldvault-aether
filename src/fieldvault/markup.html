@@ -30,15 +30,10 @@
   <main id="app-main">
     <section id="view-visits" class="view active">
       <div id="coach-card" class="coach-card">
-        <h2>How a site visit works</h2>
-        <ol class="coach-steps">
-          <li><strong>Create First Visit</strong> or tap <strong>Snap</strong> — we start a walk. Camera + area GPS.</li>
-          <li><strong>Snap</strong> equipment. Name a tag when you can. Sheet/grid is optional Skip.</li>
-          <li><strong>Punch list</strong>, then Leave (client pack) or <strong>For drawings</strong> if that is the job.</li>
-        </ol>
+        <p class="coach-line">Create a visit, or tap Snap — we start one. Camera + area GPS.</p>
         <div class="coach-actions">
-          <button type="button" id="btn-coach-dismiss" class="btn-primary">Got it — start empty</button>
-          <button type="button" id="btn-coach-demo" class="btn-secondary">Load sample walk (demo — not your plant)</button>
+          <button type="button" id="btn-coach-dismiss" class="btn-primary">Got it</button>
+          <button type="button" id="btn-coach-demo" class="btn-link">Load sample walk (demo — not your plant)</button>
         </div>
       </div>
       <div id="mode-banner" class="mode-banner">
@@ -51,9 +46,12 @@
           <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>
         </div>
         <h2 id="visits-empty-title">Start walking</h2>
-        <p id="visits-empty-body">Create a visit, or tap Snap — we start one. GPS is area-level. Sheet/grid is optional Skip.</p>
-        <button id="btn-empty-new" class="btn-primary btn-lg">Create First Visit</button>
-        <button type="button" id="btn-load-demo" class="btn-secondary">Load sample walk (demo — not your plant)</button>
+        <p id="visits-empty-body">Create a visit, or tap Snap — we start one. GPS is area-level.</p>
+        <button id="btn-empty-new" class="btn-secondary btn-lg">Create First Visit</button>
+        <div class="demo-treat">
+          <p class="demo-kicker">Demo</p>
+          <button type="button" id="btn-load-demo" class="btn-link">Load sample walk (demo — not your plant)</button>
+        </div>
       </div>
       <div id="visits-list" class="card-list"></div>
       <div class="home-tools hidden" id="home-tools">
@@ -122,6 +120,12 @@
       </div>
       <div id="eq-type-filter" class="chip-group eq-filter"></div>
       <div id="equipment-list" class="card-list"></div>
+      <div id="coach-leave" class="coach-card coach-beat hidden" data-coach-beat="2">
+        <p class="coach-line"><strong>Leave</strong> is the client pack. <strong>For drawings</strong> only if the office needs the sheet pack.</p>
+        <div class="coach-actions">
+          <button type="button" class="btn-primary" data-coach-dismiss="b2">Got it</button>
+        </div>
+      </div>
       <div class="detail-actions">
         <button id="btn-leave-site" class="btn-primary btn-lg">Leave site — send to client</button>
         <button id="btn-send-client" class="btn-primary">Send to client</button>
@@ -195,6 +199,20 @@
         <p class="help-text">Tap the mic to record. Tap again to stop. Works offline.</p>
         <div id="eq-voice-list" class="voice-list"></div>
       </div>
+      <div class="form-section fv-eq-sheet">
+        <label>Sheet/grid</label>
+        <div class="coords-row" style="grid-template-columns:1fr 1fr">
+          <input type="text" id="eq-sheet" list="fv-pid-suggest" placeholder="Sheet / P&ID" autocomplete="off">
+          <input type="text" id="eq-grid" placeholder="Grid e.g. C-4" autocomplete="off">
+        </div>
+        <p class="help-text">Skip anytime. GPS and tags still stand on their own.</p>
+        <div class="punch-actions">
+          <button type="button" class="btn-secondary btn-sm" id="eq-sheet-pin">Sheet/grid</button>
+          <button type="button" class="btn-secondary btn-sm" id="eq-plan-pin">Attach plan</button>
+          <button type="button" class="btn-secondary btn-sm hidden" id="eq-sheet-same">Same sheet</button>
+        </div>
+        <label class="checkbox-label"><input type="checkbox" id="eq-sheet-keep"> Keep placing on this sheet</label>
+      </div>
 
       <details class="optional-details fv-eq-optional">
         <summary id="optional-details-summary">Condition, P&ID, nameplate (optional)</summary>
@@ -228,14 +246,6 @@
           <div class="form-section">
             <label>P&ID / drawing number</label>
             <input type="text" id="eq-pid" list="fv-pid-suggest" placeholder="e.g. P&ID-12-041">
-          </div>
-          <div class="form-section">
-            <label>Sheet + grid (optional)</label>
-            <div class="coords-row" style="grid-template-columns:1fr 1fr">
-              <input type="text" id="eq-sheet" list="fv-pid-suggest" placeholder="Sheet / P&ID" autocomplete="off">
-              <input type="text" id="eq-grid" placeholder="Grid e.g. C-4" autocomplete="off">
-            </div>
-            <p class="help-text">Skip anytime. GPS and tags still stand on their own.</p>
           </div>
           <div class="form-section">
             <label>Line number</label>
@@ -417,6 +427,12 @@
         <h2 id="ready-check-title">Punch list</h2>
         <p class="meta" id="ready-check-meta">Name untitled pins, retake dark shots, then leave with the package. Sheet/grid is optional — For drawings if the office needs the pack.</p>
       </div>
+      <div id="coach-leave-ready" class="coach-card coach-beat hidden" data-coach-beat="2">
+        <p class="coach-line"><strong>Leave</strong> is the client pack. <strong>For drawings</strong> only if the office needs the sheet pack.</p>
+        <div class="coach-actions">
+          <button type="button" class="btn-primary" data-coach-dismiss="b2">Got it</button>
+        </div>
+      </div>
       <div id="ready-list" class="card-list"></div>
       <div class="detail-actions">
         <button id="btn-leave-site-ready" class="btn-primary btn-lg">Leave site — send to client</button>
@@ -439,28 +455,26 @@
       <div id="fv-cam-count" class="fv-cam-chip">0</div>
       <button type="button" id="fv-cam-torch" class="fv-cam-chip fv-cam-chip-btn hidden" aria-pressed="false">Light</button>
     </div>
-    <div id="fv-cam-listen" class="fv-cam-listen">Listening for a tag…</div>
+    <div id="fv-cam-coach" class="fv-cam-coach hidden">
+      <p>Snap. Area GPS. Name later.</p>
+      <button type="button" id="fv-cam-coach-dismiss" class="fv-cam-textbtn">Got it</button>
+    </div>
+    <div id="fv-cam-listen" class="fv-cam-listen hidden">Listening for a tag…</div>
     <div id="fv-cam-hint" class="fv-cam-hint">Stand at the asset. Snap. Keep walking.</div>
     <div id="fv-cam-attach" class="fv-cam-attach"></div>
-    <div id="fv-cam-sheet" class="fv-cam-sheet hidden">
-      <p class="fv-cam-sheet-copy">Pin on drawing? Optional. Skip keeps area GPS + tags.</p>
-      <div class="fv-cam-sheet-actions">
-        <button type="button" id="fv-cam-sheet-skip" class="fv-cam-textbtn">Skip</button>
-        <button type="button" id="fv-cam-sheet-same" class="fv-cam-textbtn hidden">Same sheet</button>
-        <button type="button" id="fv-cam-sheet-type" class="fv-cam-textbtn">Sheet</button>
-        <button type="button" id="fv-cam-sheet-plan" class="fv-cam-textbtn">PDF</button>
+    <div id="fv-cam-actions" class="fv-cam-actions hidden">
+      <div id="fv-cam-issues" class="fv-cam-issues">
+        <button type="button" class="fv-cam-issue" data-issue="leak">Leak</button>
+        <button type="button" class="fv-cam-issue" data-issue="notag">No tag</button>
+        <button type="button" class="fv-cam-issue" data-issue="blocked">Blocked</button>
       </div>
-      <label class="fv-cam-sheet-keep"><input type="checkbox" id="fv-cam-sheet-keep"> Keep placing on this sheet</label>
-    </div>
-    <div id="fv-cam-issues" class="fv-cam-issues">
-      <button type="button" class="fv-cam-issue" data-issue="leak">Leak</button>
-      <button type="button" class="fv-cam-issue" data-issue="notag">No tag</button>
-      <button type="button" class="fv-cam-issue" data-issue="blocked">Blocked</button>
+      <div class="fv-cam-shot-btns">
+        <button type="button" id="fv-cam-name" class="fv-cam-textbtn">Name</button>
+        <button type="button" id="fv-cam-newpin" class="fv-cam-textbtn">New pin</button>
+      </div>
     </div>
     <div class="fv-cam-dock">
-      <button type="button" id="fv-cam-name" class="fv-cam-textbtn">Name</button>
       <button type="button" id="fv-cam-shutter" class="fv-cam-shutter" aria-label="Shutter"></button>
-      <button type="button" id="fv-cam-newpin" class="fv-cam-textbtn">New pin</button>
     </div>
   </div>
 
@@ -499,6 +513,7 @@
       <button type="button" class="more-item" id="more-install">Add to Home Screen</button>
       <button type="button" class="more-item" id="more-handoff">Pass visit to another phone</button>
       <button type="button" class="more-item" id="more-export">Export ZIP (office)</button>
+      <button type="button" class="more-item" id="more-pin-drawing">Pin on drawing</button>
       <button type="button" class="more-item" id="more-drawings">For drawings</button>
       <button type="button" class="more-item" id="more-import-csv">Preload tags from CSV</button>
       <button type="button" class="more-item" id="more-pdf">PDF report (office)</button>
@@ -656,8 +671,10 @@
           <label>Grid</label>
           <input type="text" id="sheet-pin-grid" placeholder="e.g. C-4" enterkeyhint="done" autocomplete="off">
         </div>
+        <label class="checkbox-label"><input type="checkbox" id="sheet-pin-keep"> Keep placing on this sheet</label>
       </div>
       <div class="modal-footer">
+        <button type="button" class="btn-secondary hidden" id="sheet-pin-same">Same sheet</button>
         <button type="button" class="btn-secondary" id="btn-sheet-pin-skip">Skip</button>
         <button type="button" class="btn-primary" id="btn-sheet-pin-save">Save on this shot</button>
       </div>
@@ -684,8 +701,10 @@
           <label>Grid</label>
           <input type="text" id="plan-pin-grid" placeholder="e.g. C-4" autocomplete="off">
         </div>
+        <label class="checkbox-label"><input type="checkbox" id="plan-pin-keep"> Keep placing on this sheet</label>
       </div>
       <div class="modal-footer">
+        <button type="button" class="btn-secondary hidden" id="plan-pin-same">Same sheet</button>
         <button type="button" class="btn-secondary" id="btn-plan-pin-skip">Skip</button>
         <button type="button" class="btn-primary" id="btn-plan-pin-save">Save on this shot</button>
       </div>

@@ -14,6 +14,7 @@ import {
   isUntitledTag,
   hasDarkPhoto,
   leaveSiteBlockers,
+  LEAVE_SITE_SOFT_REASONS,
   mapImportRow,
   nextWalkGap,
   officePassItems,
@@ -96,7 +97,7 @@ const COPY = {
     pill: 'O&G',
     banner: 'Oil & gas field notes — photograph equipment, tag it, and leave with a client-ready package.',
     emptyTitle: 'Start walking',
-    emptyBody: 'Create a visit, or tap Snap — we start one. GPS is area-level. Sheet/grid is optional Skip.',
+    emptyBody: 'Create a visit, or tap Snap — we start one. GPS is area-level.',
     emptyCta: 'Create First Visit',
     newVisitBtn: '+ Visit',
     completenessTitle: 'How complete is this visit?',
@@ -566,10 +567,12 @@ function updateCamChrome() {
   }
   const listen = $('fv-cam-listen');
   if (listen) {
+    listen.classList.toggle('hidden', !camListenOn);
     listen.classList.toggle('off', !camListenOn);
-    listen.textContent = camListenOn ? 'Listening for a tag…' : 'Say the tag — mic off on this device';
+    listen.textContent = camListenOn ? 'Listening for a tag…' : '';
   }
   void refreshCamAttachPreview();
+  renderCamCoach();
 }
 
 async function previewAttachSuggestion() {
@@ -627,9 +630,11 @@ async function openFieldCameraUi() {
     torchBtn.setAttribute('aria-pressed', 'false');
   }
   startCamListen();
+  hideSheetPinChip();
+  hideCamShotActions();
   updateCamChrome();
   updateCamAttach(currentEquipmentId ? 'Will add to the open tag' : 'Area GPS will pick the nearest pin');
-  if (stickySheetMode) showSheetPinChip();
+  renderCamCoach();
   void refreshOfficeSuggest();
   return true;
 }
@@ -651,6 +656,8 @@ export function closeFieldCameraUi() {
   const video = $('fv-cam-video');
   if (video) video.srcObject = null;
   hideSheetPinChip();
+  hideCamShotActions();
+  renderCamCoach();
   renderStickyNext(window.__fvCurrentPhotos || []);
 }
 
@@ -663,21 +670,47 @@ function hideSheetPinChip() {
 }
 
 function showSheetPinChip() {
-  const el = $('fv-cam-sheet');
-  if (!el) return;
-  el.classList.remove('hidden');
-  el.classList.toggle('fv-cam-sheet-sticky', !!stickySheetMode);
-  const copyEl = el.querySelector('.fv-cam-sheet-copy');
-  const label = lastSheetLoc ? [lastSheetLoc.sheet, lastSheetLoc.grid].filter(Boolean).join(' ') : '';
-  if (copyEl) {
-    copyEl.textContent = stickySheetMode && label
-      ? ('Still on ' + label + '? Skip is one tap.')
-      : 'Pin on drawing? Optional. Skip keeps area GPS + tags.';
-  }
-  const keep = $('fv-cam-sheet-keep');
-  if (keep) keep.checked = !!stickySheetMode;
-  const same = $('fv-cam-sheet-same');
-  if (same) same.classList.toggle('hidden', !(lastSheetLoc && (lastSheetLoc.sheet || lastSheetLoc.grid || lastSheetLoc.drawingId)));
+  hideSheetPinChip();
+}
+
+function hideCamShotActions() {
+  $('fv-cam-actions')?.classList.add('hidden');
+}
+
+function showCamShotActions() {
+  $('fv-cam-actions')?.classList.remove('hidden');
+}
+
+function hasLastSheet() {
+  return !!(lastSheetLoc && (lastSheetLoc.sheet || lastSheetLoc.grid || lastSheetLoc.drawingId));
+}
+
+function wantsKeepPlacing() {
+  return !!(
+    $('sheet-pin-keep')?.checked ||
+    $('plan-pin-keep')?.checked ||
+    $('eq-sheet-keep')?.checked
+  );
+}
+
+function setStickyFromKeep(checked) {
+  stickySheetMode = !!checked;
+  persistSession();
+  syncKeepPlacingUi();
+}
+
+function syncKeepPlacingUi() {
+  ['sheet-pin-keep', 'plan-pin-keep', 'eq-sheet-keep'].forEach((id) => {
+    if ($(id)) $(id).checked = !!stickySheetMode;
+  });
+}
+
+function refreshSheetEntryChrome() {
+  syncKeepPlacingUi();
+  const showSame = hasLastSheet();
+  ['eq-sheet-same', 'sheet-pin-same', 'plan-pin-same'].forEach((id) => {
+    $(id)?.classList.toggle('hidden', !showSame);
+  });
 }
 
 function closeSheetPinModals() {
@@ -704,6 +737,7 @@ async function openSheetPinModal() {
   }
   hideSheetPinChip();
   prefillSheetFields();
+  refreshSheetEntryChrome();
   const eq = await dbGet(STORE_EQUIPMENT, lastCapturedEqId || currentEquipmentId);
   if (eq?.pid && $('sheet-pin-name') && !$('sheet-pin-name').value) $('sheet-pin-name').value = eq.pid;
   if (eq?.sheet?.sheet && $('sheet-pin-name')) $('sheet-pin-name').value = eq.sheet.sheet;
@@ -718,6 +752,7 @@ async function openPlanPinModal() {
   }
   hideSheetPinChip();
   prefillSheetFields();
+  refreshSheetEntryChrome();
   planPinXY = null;
   planPinDrawing = null;
   $('plan-pin-file-name').textContent = '';
@@ -751,8 +786,9 @@ async function applySheetLocation(loc) {
   await dbPut(STORE_EQUIPMENT, eq);
   lastSheetLoc = sheet;
   lastSheetPinned = hasSheetPin({ sheet });
-  stickySheetMode = true;
+  if (wantsKeepPlacing()) stickySheetMode = true;
   persistSession();
+  refreshSheetEntryChrome();
   if ($('eq-sheet')) $('eq-sheet').value = sheet.sheet;
   if ($('eq-grid')) $('eq-grid').value = sheet.grid;
   if ($('eq-pid') && eq.pid) $('eq-pid').value = eq.pid;
@@ -769,6 +805,7 @@ async function applyLastSheetPin() {
   if (!ok) return;
   hideSheetPinChip();
   showToast('Pinned to ' + [lastSheetLoc.sheet, lastSheetLoc.grid].filter(Boolean).join(' '));
+  if (currentView === 'view-ready-check') openReadyCheck();
 }
 
 async function saveTypedSheetPin() {
@@ -779,6 +816,7 @@ async function saveTypedSheetPin() {
   if (!ok) return;
   $('modal-sheet-pin')?.classList.add('hidden');
   showToast('Pinned to ' + [sheet, grid].filter(Boolean).join(' '));
+  if (currentView === 'view-ready-check') openReadyCheck();
 }
 
 async function pickPlanFile(file) {
@@ -853,6 +891,7 @@ async function savePlanPin() {
   if (!ok) return;
   $('modal-plan-pin')?.classList.add('hidden');
   showToast(sheet || grid ? 'Pinned on drawing' : 'Plan stored on this visit');
+  if (currentView === 'view-ready-check') openReadyCheck();
 }
 
 function startCamListen() {
@@ -1084,7 +1123,7 @@ async function shutterFieldCamera() {
       persistSession();
       updateCamAttach(result.message);
       showToast(result.message);
-      showSheetPinChip();
+      showCamShotActions();
     }
   } catch (err) {
     console.error(err);
@@ -1607,12 +1646,44 @@ function renderEqTypeFilter(items) {
     });
   });
 }
+function readCoachBeats() {
+  const beats = { b0: false, b1: false, b2: false };
+  try {
+    const raw = localStorage.getItem('fieldvault_coach');
+    if (raw === '1') return { b0: true, b1: true, b2: true };
+    if (raw && raw.charAt(0) === '{') {
+      const o = JSON.parse(raw);
+      beats.b0 = !!o.b0;
+      beats.b1 = !!o.b1;
+      beats.b2 = !!o.b2;
+    }
+  } catch (e) {}
+  return beats;
+}
+function writeCoachBeats(partial) {
+  const beats = { ...readCoachBeats(), ...partial };
+  try { localStorage.setItem('fieldvault_coach', JSON.stringify(beats)); } catch (e) {}
+  renderCoach();
+  renderCamCoach();
+  renderLeaveCoach();
+}
 function renderCoach(visitCount) {
   const el = $('coach-card');
   if (!el) return;
-  let dismissed = false;
-  try { dismissed = localStorage.getItem('fieldvault_coach') === '1'; } catch (e) {}
-  el.classList.toggle('hidden', dismissed || isDefense() || visitCount > 0);
+  const n = visitCount != null ? visitCount : (latestVisitId ? 1 : 0);
+  el.classList.toggle('hidden', readCoachBeats().b0 || isDefense() || n > 0);
+}
+function renderCamCoach() {
+  const el = $('fv-cam-coach');
+  if (!el) return;
+  const show = cameraOpen && !readCoachBeats().b1 && !isDefense();
+  el.classList.toggle('hidden', !show);
+}
+function renderLeaveCoach() {
+  const show = !readCoachBeats().b2 && !isDefense() && !!currentVisitId;
+  document.querySelectorAll('[data-coach-beat="2"]').forEach((el) => {
+    el.classList.toggle('hidden', !show);
+  });
 }
 
 const KIND_CARDS = [
@@ -2665,6 +2736,7 @@ async function loadVisitDetail(id) {
   }
   persistSession();
   void refreshOfficeSuggest();
+  renderLeaveCoach();
 }
 
 function eqCardHtml(eq, areas) {
@@ -2724,43 +2796,40 @@ function renderCompleteness(items) {
   $('completeness-warnings').innerHTML = warnings.map(w => '<div>'+w+'</div>').join('');
 }
 
-async function openReadyCheck() {
-  const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
-  showView('view-ready-check');
-  $('header-title').textContent = isDefense() ? 'Processing Check' : 'Punch list';
-  void refreshOfficeSuggest();
-  const list = $('ready-list');
-  const c = copy();
-  const annotated = items.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) }));
-  const hard = officePassItems(annotated);
-  if (hard.length === 0) {
-    list.innerHTML = `<div class="empty-state"><h2>${escapeHtml(c.readyAllGood)}</h2><p>${escapeHtml(c.readyAllGoodBody)}</p>
-      <button type="button" class="btn-primary btn-lg" id="btn-leave-clean">Leave site — send to client</button>
-      <button type="button" class="btn-secondary" id="btn-drawings-clean">For drawings</button></div>`;
-    $('btn-leave-clean')?.addEventListener('click', () => void leaveSite({ force: true }));
-    $('btn-drawings-clean')?.addEventListener('click', () => void exportDrawingPackage());
-    return;
-  }
-  const cards = hard.map(eq => {
-    const reasons = officePassReasons(eq);
-    const untitled = reasons.some((r) => r.id === 'untitled');
-    const dark = reasons.some((r) => r.id === 'dark' || r.id === 'blur' || r.id === 'dup');
-    const miss = missingRequiredShots(eq);
-    const retakeShot = dark ? (eq.photos || []).find((p) => /dark|blur|duplicate/i.test(p.note || ''))?.promptType || 'overall' : (miss[0] && miss[0].id) || '';
-    return `<div class="card danger-border punch-card" data-id="${eq.id}">
+function punchSheetActionsHtml(eq) {
+  const unpinned = officePassReasons(eq).some((r) => r.id === 'unpinned');
+  if (!unpinned) return '';
+  return `<button type="button" class="btn-secondary btn-sm punch-sheet" data-id="${eq.id}">Sheet/grid</button>
+        <button type="button" class="btn-secondary btn-sm punch-plan" data-id="${eq.id}">Attach plan</button>
+        ${hasLastSheet() ? `<button type="button" class="btn-secondary btn-sm punch-same" data-id="${eq.id}">Same sheet</button>` : ''}`;
+}
+
+function punchCardHtml(eq, soft) {
+  const reasons = officePassReasons(eq);
+  const untitled = reasons.some((r) => r.id === 'untitled');
+  const dark = reasons.some((r) => r.id === 'dark' || r.id === 'blur' || r.id === 'dup');
+  const miss = missingRequiredShots(eq);
+  const retakeShot = dark ? (eq.photos || []).find((p) => /dark|blur|duplicate/i.test(p.note || ''))?.promptType || 'overall' : (miss[0] && miss[0].id) || '';
+  const shownReasons = soft
+    ? reasons.filter((r) => LEAVE_SITE_SOFT_REASONS.has(r.id))
+    : reasons;
+  return `<div class="card ${soft ? 'punch-soft' : 'danger-border'} punch-card" data-id="${eq.id}">
       <div class="card-title"><span class="tag-badge">${escapeHtml(eq.tag||'?')}</span></div>
-      <div class="card-meta">${reasons.map((r) => r.label).join(' · ')}</div>
-        ${untitled ? `<div class="punch-rename-row">
+      <div class="card-meta">${escapeHtml(shownReasons.map((r) => r.label).join(' · '))}${soft ? ' · optional' : ''}</div>
+        ${untitled && !soft ? `<div class="punch-rename-row">
         <input type="text" class="punch-rename" list="fv-tag-suggest" data-id="${eq.id}" placeholder="e.g. P-101" enterkeyhint="done">
         <button type="button" class="btn-primary btn-sm punch-save-name" data-id="${eq.id}">Name</button>
       </div>` : ''}
+      ${soft ? '<p class="help-text">Skip is fine. Pin here if the office needs a sheet pack.</p>' : ''}
       <div class="punch-actions">
-        ${retakeShot ? `<button type="button" class="btn-secondary btn-sm punch-retake" data-id="${eq.id}" data-shot="${retakeShot}">Retake</button>` : ''}
-        ${eq.needsFollowup ? `<button type="button" class="btn-secondary btn-sm punch-close" data-close="${eq.id}">Close follow-up</button>` : ''}
+        ${!soft && retakeShot ? `<button type="button" class="btn-secondary btn-sm punch-retake" data-id="${eq.id}" data-shot="${retakeShot}">Retake</button>` : ''}
+        ${!soft && eq.needsFollowup ? `<button type="button" class="btn-secondary btn-sm punch-close" data-close="${eq.id}">Close follow-up</button>` : ''}
+        ${punchSheetActionsHtml(eq)}
       </div>
     </div>`;
-  }).join('');
-  list.innerHTML = cards;
+}
+
+function bindPunchList(list) {
   list.querySelectorAll('.punch-save-name').forEach((b) => {
     b.addEventListener('click', (ev) => {
       ev.stopPropagation();
@@ -2785,6 +2854,33 @@ async function openReadyCheck() {
       startFastTake(b.dataset.shot || null);
     });
   });
+  list.querySelectorAll('.punch-sheet').forEach((b) => {
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      currentEquipmentId = b.dataset.id;
+      lastCapturedEqId = b.dataset.id;
+      persistSession();
+      void openSheetPinModal();
+    });
+  });
+  list.querySelectorAll('.punch-plan').forEach((b) => {
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      currentEquipmentId = b.dataset.id;
+      lastCapturedEqId = b.dataset.id;
+      persistSession();
+      void openPlanPinModal();
+    });
+  });
+  list.querySelectorAll('.punch-same').forEach((b) => {
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      currentEquipmentId = b.dataset.id;
+      lastCapturedEqId = b.dataset.id;
+      persistSession();
+      void applyLastSheetPin();
+    });
+  });
   list.querySelectorAll('.card').forEach(card => {
     card.addEventListener('click', (ev) => {
       if (ev.target.closest('button, input')) return;
@@ -2805,6 +2901,38 @@ async function openReadyCheck() {
       openReadyCheck();
     });
   });
+  $('btn-leave-clean')?.addEventListener('click', () => void leaveSite({ force: true }));
+  $('btn-drawings-clean')?.addEventListener('click', () => void exportDrawingPackage());
+}
+
+async function openReadyCheck() {
+  const items = await dbGetByIndex(STORE_EQUIPMENT, 'visitId', currentVisitId);
+  showView('view-ready-check');
+  $('header-title').textContent = isDefense() ? 'Processing Check' : 'Punch list';
+  void refreshOfficeSuggest();
+  renderLeaveCoach();
+  const list = $('ready-list');
+  const c = copy();
+  const annotated = items.map((e) => ({ ...e, missingRequired: missingRequiredShots(e) }));
+  const hard = leaveSiteBlockers(annotated);
+  const softOnly = annotated.filter((eq) => {
+    const reasons = officePassReasons(eq);
+    return reasons.length > 0 && !reasons.some((r) => !LEAVE_SITE_SOFT_REASONS.has(r.id));
+  });
+  let html = '';
+  if (hard.length === 0) {
+    html += `<div class="empty-state"><h2>${escapeHtml(c.readyAllGood)}</h2><p>${escapeHtml(c.readyAllGoodBody)}</p>
+      <button type="button" class="btn-primary btn-lg" id="btn-leave-clean">Leave site — send to client</button>
+      <button type="button" class="btn-secondary" id="btn-drawings-clean">For drawings</button></div>`;
+  } else {
+    html += hard.map((eq) => punchCardHtml(eq, false)).join('');
+  }
+  if (softOnly.length) {
+    html += '<p class="help-text">Sheet/grid is optional — Skip is fine.</p>';
+    html += softOnly.map((eq) => punchCardHtml(eq, true)).join('');
+  }
+  list.innerHTML = html;
+  bindPunchList(list);
 }
 
 async function savePunchName(id, raw) {
@@ -2960,6 +3088,7 @@ async function openNewEquipment(fromArea=false) {
   setEqType('other', { silent: true });
   renderEqPager();
   renderCrumbs();
+  refreshSheetEntryChrome();
 }
 
 async function populateAreaSelect(selectedId) {
@@ -3014,6 +3143,7 @@ async function loadEquipmentDetail(id) {
   lastSheetPinned = hasSheetPin(eq);
   if (eq.sheet && (eq.sheet.sheet || eq.sheet.grid || eq.sheet.drawingId)) lastSheetLoc = eq.sheet;
   persistSession();
+  refreshSheetEntryChrome();
   void refreshOfficeSuggest();
 }
 
@@ -3081,6 +3211,11 @@ async function saveEquipment(opts) {
   eq.serial = $('eq-serial') ? $('eq-serial').value.trim() : '';
   eq.updatedAt = now;
   await dbPut(STORE_EQUIPMENT, eq);
+  if (eq.sheet && (eq.sheet.sheet || eq.sheet.grid || eq.sheet.drawingId)) lastSheetLoc = eq.sheet;
+  lastSheetPinned = hasSheetPin(eq);
+  if ($('eq-sheet-keep')) stickySheetMode = !!$('eq-sheet-keep').checked;
+  persistSession();
+  refreshSheetEntryChrome();
   const visit = await dbGet(STORE_VISITS, currentVisitId);
   if (visit) { visit.updatedAt = now; await dbPut(STORE_VISITS, visit); }
   if (!(opts && opts.silent)) {
@@ -4752,20 +4887,22 @@ function initEvents() {
   $('btn-mode-commercial')?.addEventListener('click', () => setProductMode('commercial'));
   $('btn-mode-defense')?.addEventListener('click', () => setProductMode('defense'));
   $('btn-coach-dismiss')?.addEventListener('click', () => {
-    try { localStorage.setItem('fieldvault_coach', '1'); } catch (e) {}
-    renderCoach(latestVisitId ? 1 : 0);
+    writeCoachBeats({ b0: true });
   });
   $('btn-coach-demo')?.addEventListener('click', () => {
     void seedFieldVaultDemo().then((ok) => {
       if (ok) {
-        try { localStorage.setItem('fieldvault_coach', '1'); } catch (e) {}
-        renderCoach(1);
+        writeCoachBeats({ b0: true });
         renderVisitsList();
       }
     });
   });
   $('btn-load-demo')?.addEventListener('click', () => {
     void seedFieldVaultDemo().then((ok) => { if (ok) renderVisitsList(); });
+  });
+  $('fv-cam-coach-dismiss')?.addEventListener('click', () => writeCoachBeats({ b1: true }));
+  document.querySelectorAll('[data-coach-dismiss="b2"]').forEach((b) => {
+    b.addEventListener('click', () => writeCoachBeats({ b2: true }));
   });
   $('tile-add-eq')?.addEventListener('click', () => openNewEquipment(false));
   $('btn-sticky-take')?.addEventListener('click', () => startFastTake(stickyNextShotId));
@@ -4940,6 +5077,10 @@ function initEvents() {
   $('more-handoff')?.addEventListener('click', () => { setMoreOpen(false); void openHandoffModal(); });
   $('more-export')?.addEventListener('click', () => { setMoreOpen(false); void exportVisitPackage(); });
   $('more-drawings')?.addEventListener('click', () => { setMoreOpen(false); void exportDrawingPackage(); });
+  $('more-pin-drawing')?.addEventListener('click', () => {
+    setMoreOpen(false);
+    void openSheetPinModal();
+  });
   $('btn-export-drawings')?.addEventListener('click', () => void exportDrawingPackage());
   $('btn-export-drawings-ready')?.addEventListener('click', () => void exportDrawingPackage());
   $('more-import-csv')?.addEventListener('click', () => {
@@ -4951,15 +5092,14 @@ function initEvents() {
     e.target.value = '';
     if (f) void importTagsCsv(f);
   });
-  $('fv-cam-sheet-skip')?.addEventListener('click', () => hideSheetPinChip());
-  $('fv-cam-sheet-same')?.addEventListener('click', () => void applyLastSheetPin());
-  $('fv-cam-sheet-type')?.addEventListener('click', () => void openSheetPinModal());
-  $('fv-cam-sheet-plan')?.addEventListener('click', () => void openPlanPinModal());
-  $('fv-cam-sheet-keep')?.addEventListener('change', (e) => {
-    stickySheetMode = !!e.target.checked;
-    persistSession();
-    if (cameraOpen) showSheetPinChip();
-  });
+  $('eq-sheet-pin')?.addEventListener('click', () => void openSheetPinModal());
+  $('eq-plan-pin')?.addEventListener('click', () => void openPlanPinModal());
+  $('eq-sheet-same')?.addEventListener('click', () => void applyLastSheetPin());
+  $('eq-sheet-keep')?.addEventListener('change', (e) => setStickyFromKeep(e.target.checked));
+  $('sheet-pin-keep')?.addEventListener('change', (e) => setStickyFromKeep(e.target.checked));
+  $('plan-pin-keep')?.addEventListener('change', (e) => setStickyFromKeep(e.target.checked));
+  $('sheet-pin-same')?.addEventListener('click', () => void applyLastSheetPin());
+  $('plan-pin-same')?.addEventListener('click', () => void applyLastSheetPin());
   $('btn-sheet-pin-close')?.addEventListener('click', closeSheetPinModals);
   $('btn-sheet-pin-skip')?.addEventListener('click', closeSheetPinModals);
   $('btn-sheet-pin-save')?.addEventListener('click', () => void saveTypedSheetPin());
@@ -5043,6 +5183,8 @@ async function init() {
     const session = restoreSession();
     if (currentVisitId) latestVisitId = currentVisitId;
     await restoreLastPlace(session);
+    refreshSheetEntryChrome();
+    renderLeaveCoach();
     void refreshOfficeSuggest();
   } catch (err) {
     console.error(err);
